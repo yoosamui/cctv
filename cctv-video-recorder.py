@@ -1,159 +1,105 @@
-import subprocess
-import time
 import os
-import shutil
-import logging
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1" 
+
+import cv2
+import requests
+import time
 from datetime import datetime
-from flask import Flask, request
+from ultralytics import YOLO
 from threading import Thread
+import queue
 
-# ================= SILENCE FLASK LOGS =================
-# We only use the logger level to avoid the KeyError 
-# while keeping the terminal clean.
-log = logging.getLogger('werkzeug')
-# log.setLevel(logging.ERROR)
-log.setLevel(logging.INFO)
+# --- CONFIG ---
+CAMERAS = {
+    "Gate": {
+        "url": "rtsp://admin:master!31416Pi@192.168.1.99:554/Streaming/channels/102",
+        "pi_endpoint": "http://192.168.1.14:5000/upload"
+    },
+}
 
-# ======================================================
+model = YOLO("yolov8n.pt") 
+model.to('cpu')
 
-# ================= CONFIGURATION =================
-CAM_NAME = "Gate"
-URL = "rtsp://admin:master!31416Pi@192.168.1.99:554/Streaming/channels/101"
-BASE_DIR = "/media/share/cameras/cctv-storage" 
-TEMP_DIR = "/tmp/cctv_staging" 
-# =================================================
+# Image every 3 seconds
+COOLDOWN = 3 
+last_sent = {name: 0 for name in CAMERAS}
 
-current_video_prefix = f"{CAM_NAME}_Init"
-os.makedirs(TEMP_DIR, exist_ok=True)
-app = Flask(__name__)
+# Keep video capture objects open
+captures = {}
 
-def get_daily_dir():
-    """Returns daily folder path and ensures it exists."""
-    today = datetime.now().strftime("%Y-%m-%d")
-    daily_path = os.path.join(BASE_DIR, today)
-    if not os.path.exists(daily_path):
-        try:
-            os.makedirs(daily_path, mode=0o777, exist_ok=True)
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] DIR ERROR: {e}", flush=True)
-            return BASE_DIR 
-    return daily_path
+print("AI Master Brain: Yellow Boxes | 3s Interval | Fixed Naming")
 
-@app.route("/upload", methods=["POST"])
-def upload_image():
-    """Receives detection images from the PC."""
-    global current_video_prefix
-    if 'image' in request.files:
-        file = request.files['image']
-        target_dir = get_daily_dir()
-        actual_time = datetime.now().strftime("%H-%M-%S")
-        new_filename = f"{current_video_prefix}_DETECTION_{actual_time}.jpg"
-        save_path = os.path.join(target_dir, new_filename)
-        
-        try:
-            file.save(save_path)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] IMAGE SAVED: {new_filename}", flush=True)
-            return {"status": "success"}, 200
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] IMG SAVE ERROR: {e}", flush=True)
-            return {"status": "error", "message": str(e)}, 500
-    return {"status": "error"}, 400
-
-def run_flask():
-    """Runs the listener for AI detection."""
-    # use_reloader=False is critical for service stability
-    app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False, threaded=True)
-
-def move_to_share_background(local_path, start_epoch, filename):
-    """Background thread: Moves video to share and fixes timestamp."""
-    try:
-        final_dir = get_daily_dir()
-        final_path = os.path.join(final_dir, filename)
-        
-        if os.path.exists(local_path):
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Background Transfer Starting: {filename}", flush=True)
-            shutil.move(local_path, final_path)
-            
-            # Update timestamp to start of recording for perfect sorting
-            try:
-                os.utime(final_path, (start_epoch, start_epoch))
-            except:
-                pass
-                
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Background Transfer Finished: {filename}", flush=True)
-    except Exception as e:
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] BACKGROUND MOVE FAILED: {e}", flush=True)
-
-def recording_loop():
-    """Main loop: Focuses strictly on recording segments."""
-    global current_video_prefix
-    while True:
-        # Kill any runaway FFmpeg instances
-        subprocess.run(["pkill", "-9", "ffmpeg"], stderr=subprocess.DEVNULL)
-        
-        start_epoch = time.time()
-        timestamp = datetime.fromtimestamp(start_epoch).strftime("%Y-%m-%d_%H-%M-%S")
-        
-        current_video_prefix = f"{CAM_NAME}_{timestamp}"
-        filename = f"{current_video_prefix}.mp4"
-        local_path = os.path.join(TEMP_DIR, filename)
-
-        # FFmpeg Command: Direct Stream Copy (Low CPU)
-        cmd = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
-            "-rtsp_transport", "tcp",
-            "-i", URL,
-            "-c:v", "copy", "-map", "0:v:0",
-            "-t", "300", local_path
-        ]
-
-        try:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] RECORDING SEGMENT: {filename}", flush=True)
-            subprocess.run(cmd, check=True)
-            
-            # Kick off the background move
-            if os.path.exists(local_path):
-                Thread(target=move_to_share_background, 
-                       args=(local_path, start_epoch, filename),
-                       daemon=True).start()
-                
-        except Exception as e:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] RECORDING ERROR: {e}", flush=True)
-            time.sleep(10)
-        
-        cleanup_old_folders(days=7)
-
-def cleanup_old_folders(days):
-    """Cleanup old history from the share."""
-    try:
-        now = time.time()
-        for folder_name in os.listdir(BASE_DIR):
-            folder_path = os.path.join(BASE_DIR, folder_name)
-            if os.path.isdir(folder_path) and len(folder_name) == 10:
-                if os.stat(folder_path).st_mtime < now - (days * 86400):
-                    shutil.rmtree(folder_path)
-    except:
-        pass
-
-if __name__ == "__main__":
-    print(">>> SERVICE STARTING...", flush=True)
-
-    # 1. Clean up port 5000 
-    try:
-        subprocess.run(["fuser", "-k", "5000/tcp"], stderr=subprocess.DEVNULL)
-    except:
-        pass
-
-    # 2. Start Flask as a background daemon
-    print(">>> Launching Flask API Thread...", flush=True)
-    server_thread = Thread(target=run_flask, daemon=True)
-    server_thread.start()
+def process_frame(name, config, frame):
+    """Process a single frame for detections"""
+    results = model(frame, classes=[0], conf=0.5, verbose=False, device='cpu')
     
-    time.sleep(1)
+    if len(results[0].boxes) > 0:
+        yellow = (0, 255, 255)
+        
+        for box in results[0].boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            conf = float(box.conf[0])
+            cv2.rectangle(frame, (x1, y1), (x2, y2), yellow, 2)
+            label = f"PERSON {conf:.2f}"
+            cv2.putText(frame, label, (x1, y1 - 10), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, yellow, 2)
+        
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] PERSON on {name} - Sending Image")
+        
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        filename = f"{name}_{timestamp}_PERSON.jpg"
+        _, img_encoded = cv2.imencode('.jpg', frame)
+        
+        try:
+            requests.post(
+                config['pi_endpoint'], 
+                files={"image": (filename, img_encoded.tobytes(), 'image/jpeg')},
+                timeout=2
+            )
+            return True
+        except Exception as e:
+            print(f"Failed to send: {e}")
+            return False
+    return False
 
-    # 3. Start Main Loop
-    print(">>> Entering Recording Loop...", flush=True)
-    try:
-        recording_loop()
-    except Exception as e:
-        print(f">>> CRITICAL ERROR: {e}", flush=True)
+# Initialize captures
+for name, config in CAMERAS.items():
+    cap = cv2.VideoCapture(config['url'])
+    if cap.isOpened():
+        captures[name] = cap
+        print(f"Connected to {name}")
+    else:
+        print(f"Failed to connect to {name}")
+
+try:
+    while True:
+        for name, config in CAMERAS.items():
+            cap = captures.get(name)
+            if not cap or not cap.isOpened():
+                # Try to reconnect
+                print(f"Reconnecting to {name}...")
+                cap = cv2.VideoCapture(config['url'])
+                if cap.isOpened():
+                    captures[name] = cap
+                else:
+                    continue
+            
+            ret, frame = cap.read()
+            if not ret:
+                print(f"Failed to read from {name}")
+                continue
+            
+            now = time.time()
+            if now - last_sent[name] > COOLDOWN:
+                if process_frame(name, config, frame):
+                    last_sent[name] = now
+        
+        time.sleep(0.1)  # Small delay to prevent CPU spinning
+        
+except KeyboardInterrupt:
+    print("\nShutting down...")
+finally:
+    # Clean up
+    for cap in captures.values():
+        cap.release()
+    print("Cleanup complete")
