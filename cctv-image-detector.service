@@ -1,0 +1,22 @@
+[Unit]
+Description=CCTV YOLO Detector
+After=network.target
+
+[Service]
+User=ops
+WorkingDirectory=/home/ops/cctv/PYEVO
+ExecStart=/home/ops/PYEVO/bin/python3 -u /home/ops/cctv/PYEVO/cctv-image-detector.py
+Restart=always
+RestartSec=5
+# This ensures logs go to the right place
+StandardOutput=journal
+StandardError=journal
+
+
+[Install]
+WantedBy=multi-user.target
+
+
+
+
+
