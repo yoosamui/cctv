@@ -1,8 +1,31 @@
+"""
+CCTV Recorder with Person Detection
+====================================
+
+Usage Examples:
+---------------
+Gate camera:
+    python cctv_recorder.py --name Gate --url rtsp://admin:master!31416Pi@192.168.1.99:554/Streaming/channels/101
+
+Center camera:
+    python cctv_recorder.py --name Center --url rtsp://admin:master!31416Pi@192.168.1.100:554/Streaming/channels/102
+
+Backyard camera with different credentials:
+    python cctv_recorder.py --name Backyard --url rtsp://admin:password123@192.168.1.50:554/Streaming/channels/101
+
+Using short form parameters:
+    python cctv_recorder.py -n Gate -u rtsp://admin:pass@192.168.1.99:554/Streaming/channels/101
+
+Show help:
+    python cctv_recorder.py --help
+"""
+
 import subprocess
 import time
 import os
 import shutil
 import logging
+import argparse
 from datetime import datetime
 from flask import Flask, request
 from threading import Thread, Lock
@@ -14,9 +37,9 @@ log = logging.getLogger('werkzeug')
 log.setLevel(logging.INFO)
 # ======================================================
 
-# ================= CONFIGURATION =================
-CAM_NAME = "Gate"
-URL = "rtsp://admin:master!31416Pi@192.168.1.99:554/Streaming/channels/101"
+# ================= GLOBAL VARIABLES =================
+CAM_NAME = None
+URL = None
 BASE_DIR = "/media/share/cameras/cctv-storage" 
 TEMP_DIR = "/tmp/cctv_staging"
 RETENTION_DAYS = 7
@@ -24,12 +47,41 @@ SEGMENT_DURATION = 300  # 5 minutes
 # =================================================
 
 # Global tracker with thread safety
-current_video_prefix = f"Init_{CAM_NAME}"
+current_video_prefix = ""
 prefix_lock = Lock()
 shutdown_flag = False
 
 os.makedirs(TEMP_DIR, exist_ok=True)
 app = Flask(__name__)
+
+def parse_arguments():
+    """Parse command line arguments."""
+    parser = argparse.ArgumentParser(
+        description='CCTV Recorder with Person Detection',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog='''
+Examples:
+  python cctv_recorder.py --name Gate --url "rtsp://admin:master!31416Pi@192.168.1.99:554/Streaming/channels/101"
+  python cctv_recorder.py --name Center --url "rtsp://admin:master!31416Pi@192.168.1.100:554/Streaming/channels/102"
+  python cctv_recorder.py -n Backyard -u "rtsp://admin:pass@192.168.1.50:554/Streaming/channels/101"
+        '''
+    )
+    
+    parser.add_argument(
+        '--name', '-n',
+        type=str,
+        required=True,
+        help='Camera name (e.g., Gate, Center, Backyard)'
+    )
+    
+    parser.add_argument(
+        '--url', '-u',
+        type=str,
+        required=True,
+        help='Full RTSP URL (e.g., rtsp://username:password@ip:port/Streaming/channels/101)'
+    )
+    
+    return parser.parse_args()
 
 def get_camera_dir():
     """Returns camera-specific folder path: BASE_DIR/YYYY-MM-DD/CAM_NAME/"""
@@ -206,6 +258,13 @@ def signal_handler(signum, frame):
     sys.exit(0)
 
 if __name__ == "__main__":
+    # Parse command line arguments
+    args = parse_arguments()
+    
+    # Set global configuration from arguments
+    CAM_NAME = args.name
+    URL = args.url
+    
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
