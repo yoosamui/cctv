@@ -24,6 +24,10 @@ NODES = {
     "Entrance": {
         "cam_rtsp": "rtsp://admin:master%2131416Pi@192.168.1.89:554/Streaming/channels/102",
         "rpi_upload_url": "http://192.168.1.15:5000/upload"
+    },
+     "Garage": {
+        "cam_rtsp": "rtsp://admin:master%2131416Pi@192.168.1.81:554/Streaming/channels/102",
+        "rpi_upload_url": "http://192.168.1.16:5000/upload"
     }
 }
 
