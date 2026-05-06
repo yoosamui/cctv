@@ -1,2 +1,46 @@
 # cctv
 cctv recorder (RPI) and yolo person detection 
+## Project Overview: The "Samui-Cyber" NVR
+This project is a custom-built, lightweight Network Video Recorder (NVR) designed to handle high-definition surveillance with minimal overhead. Instead of relying on a bulky, closed-source NVR box, we’ve distributed the workload across your local network for maximum efficiency and security.
+
+### How It’s Built (Architecture)
+The system is divided into three distinct layers to ensure that even if one part fails, your footage remains safe:
+
+*   **The Source (Hikvision):** High-resolution Hikvision cameras provide the raw video data via RTSP (Real Time Streaming Protocol).
+*   **The Engine (Raspberry Pi):** A Raspberry Pi acts as the "Brains." It runs a continuous **Bash script** that uses **FFmpeg** to pull the RTSP stream, segmenting it into 5-minute `.mp4` chunks.
+*   **The Storage (NAS/Share):** The Pi doesn't keep the files locally; it automatically moves them to a network share organized by **Year/Month/Date**.
+*   **The Archive (Logic):** A secondary script manages the storage by archiving older folders and deleting data once it reaches a certain age to prevent the drive from filling up.
+
+---
+
+### Installation & Setup Guide
+
+#### 1. Hardware Preparation
+*   **Camera:** Ensure your Hikvision camera is on a static IP (e.g., `192.168.1.99`).
+*   **Pi:** Use a Raspberry Pi (v3 or v4) running **Debian/Raspberry Pi OS**.
+*   **Network:** Connect both to your local network via Ethernet for the best stability.
+
+#### 2. The Recording Script
+The core of the project is the `capture.sh` script. It uses the following logic:
+```bash
+# Example FFmpeg command used in our project
+ffmpeg -i "rtsp://user:pass@IP:554/Streaming/channels/101" \
+-c copy -map 0 -f segment -segment_time 300 \
+-reset_timestamps 1 -strftime 1 "Gate_%Y-%m-%d_%H-%M-%S.mp4"
+```
+*   **-c copy:** This is critical; it tells the Pi to just "copy" the video stream without re-encoding it, which keeps the Pi's CPU usage extremely low.
+
+#### 3. Organizing the Data
+We use a **Cron Job** to run the archival script every night at midnight. This script:
+1.  Creates a new directory for the current date (e.g., `2026-05-05`).
+2.  Moves the previous day's `.mp4` files into the appropriate archive folder.
+
+#### 4. Viewing the Footage
+Since the files are saved as standard `.mp4` files on a network share, you don't need proprietary software:
+*   **Live View:** Use VLC to open the RTSP stream directly.
+*   **Review:** Simply open the mapped network drive on your PC and play the 5-minute segments in any media player.
+
+---
+
+### Maintenance
+Because you are a Network Engineer, you can monitor the health of the system using **Zabbix**. We have configured it to track the Pi's status and ensure the recording service is always active.

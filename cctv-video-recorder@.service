@@ -1,0 +1,18 @@
+[Unit]
+Description=CCTV Recording Service (%i)
+After=network.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/cctv
+EnvironmentFile=/etc/cctv/%i.conf
+# The -u flag forces immediate logging
+ExecStart=/usr/bin/python3 -u /home/pi/cctv/cctv-video-recorder.py --name %i --url ${URL}
+Restart=always
+RestartSec=5
+# This ensures logs go to the right place
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
