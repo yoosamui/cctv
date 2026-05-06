@@ -20,7 +20,12 @@ NODES = {
     "Center": {
         "cam_rtsp": "rtsp://admin:master%2131416Pi@192.168.1.82:554/Streaming/channels/102",
         "rpi_upload_url": "http://192.168.1.13:5000/upload"
+    },
+    "Entrance": {
+        "cam_rtsp": "rtsp://admin:master%2131416Pi@192.168.1.89:554/Streaming/channels/102",
+        "rpi_upload_url": "http://192.168.1.15:5000/upload"
     }
+
 }
 
 # --- FRAME STORAGE ---
@@ -175,6 +180,14 @@ try:
 
 except KeyboardInterrupt:
     print("\n[INFO] Shutting down...")
+
+
+
+
+
+
+
+
 
 
 
