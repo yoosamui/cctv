@@ -25,7 +25,6 @@ NODES = {
         "cam_rtsp": "rtsp://admin:master%2131416Pi@192.168.1.89:554/Streaming/channels/102",
         "rpi_upload_url": "http://192.168.1.15:5000/upload"
     }
-
 }
 
 # --- FRAME STORAGE ---
@@ -119,8 +118,8 @@ try:
 
             now = time.time()
 
-            # --- YOLO every 3 seconds ---
-            if now - last_yolo_run[name] < 3.0:
+            # --- YOLO every 5 seconds ---
+            if now - last_yolo_run[name] < 5.0:
                 continue
 
             last_yolo_run[name] = now
@@ -135,7 +134,7 @@ try:
             results = model.predict(
                 raw_frame,
                 imgsz=416,
-                conf=0.25,
+                conf=0.35,
                 classes=[0],
                 verbose=False
             )
@@ -144,8 +143,41 @@ try:
                 print(f"[{ts}] [DETECT] {name} - PERSON")
                 last_detect_time[name] = now
 
-                # ✅ DRAW BOUNDING BOXES
-                annotated_frame = results[0].plot()
+                #  CUSTOM DRAW (YELLOW BOX + BLACK TEXT)
+                annotated_frame = raw_frame.copy()
+
+                for box in results[0].boxes:
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    conf = float(box.conf[0])
+
+                    box_color = (0, 255, 255)   # yellow
+                    text_color = (0, 0, 0)      # black
+                    bg_color = (0, 255, 255)    # yellow
+
+                    label = f"PERSON {conf:.2f}"
+
+                    # Draw box
+                    cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), box_color, 1)
+
+                    # Text size
+                    (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 2)
+
+                    # Prevent text going outside frame
+                    y_text = max(y1 - 5, 15)
+
+                    # Background rectangle
+                    cv2.rectangle(annotated_frame, (x1, y_text - h - 5), (x1 + w, y_text), bg_color, -1)
+
+                    # Text
+                    cv2.putText(
+                        annotated_frame,
+                        label,
+                        (x1, y_text - 2),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5,
+                        text_color,
+                        1
+                    )
 
                 if now - last_alert[name] > 5.0:
                     executor.submit(send_to_rpi, name, annotated_frame, ts)
