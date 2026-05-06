@@ -1,6 +1,7 @@
 [Unit]
 Description=CCTV Recording Service (%i)
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 User=pi
@@ -16,3 +17,5 @@ StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
+
+
