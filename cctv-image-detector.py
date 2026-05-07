@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 load_dotenv("/etc/cctv/credentials.env")
 CAM_PASS = os.getenv("CAM_PASS")
 password = quote(CAM_PASS)
+#print(f"PASSWORD=[{password}]")
 
 # --- NETWORK OPTIMIZATION ---
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;5000000"
@@ -35,7 +36,16 @@ NODES = {
      "Garage": {
         "cam_rtsp": f"rtsp://yoo:{password}@192.168.1.81:554/Streaming/channels/102",
         "rpi_upload_url": "http://192.168.1.16:5000/upload"
+    },
+     "Behind": {
+        "cam_rtsp": f"rtsp://yoo:{password}@192.168.1.92:554/Streaming/channels/102",
+        "rpi_upload_url": "http://192.168.1.17:5000/upload"
+    },
+     "Left": {
+        "cam_rtsp": f"rtsp://yoo:{password}@192.168.1.93:554/Streaming/channels/102",
+        "rpi_upload_url": "http://192.168.1.18:5000/upload"
     }
+
 }
 
 # --- FRAME STORAGE ---

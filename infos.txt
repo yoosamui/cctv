@@ -1,3 +1,40 @@
+PI cctv new INSTALL 
+--------------------
+1.  update & upgrade
+2.  timedatectl set-timezone Asia/Bangkok
+3.  git clone https://github.com/yoosamui/cctv.git
+4.  cd cctv
+5.  rm -f cctv-image*
+6.  sudo mkdir -p /etc/cctv
+7.  sudo nano /etc/cctv/Gatename.conf 
+8.  add the rtsp stream : URL=rtsp://<USER>:<PASSWORD>@192.168.1.89:554/Streaming/channels/101
+
+    sudo apt install python3-flask -y
+
+9.  sudo cp  cctv-video-recorder@.service /etc/systemd/system/
+
+    sudo systemctl start cctv-video-recorder@Gatename.service
+    sudo systemctl status cctv-video-recorder@Gatename.service
+    sudo systemctl enable cctv-video-recorder@Gatename.service
+
+
+    check if works: journalctl -u cctv-video-recorder@Gatename.service -o cat
+    reboot and check again.    
+
+    finish
+    	
+    
+ 
+ 
+ check if works: journalctl -u cctv-video-recorder@Gatename.service -o cat
+ reboot and check again.
+
+sudo apt install python3-flask -y
+journalctl -u cctv-video-recorder@Left.service -f -o cat
+
+sudo reboot
+
+
 sudo systemctl enable systemd-networkd-wait-online.service
 
 
@@ -9,7 +46,7 @@ Option A: inline in service
 ExecStartPre=/bin/bash -c 'until ping -c1 -W1 192.168.1.82; do sleep 2; done'
 ExecStart=/usr/bin/python3 -u /home/pi/cctv/cctv-video-recorder.py --name %i --url ${URL}
 
-
+timedatectl set-timezone Asia/Bangkok
 
 [Unit]
 After=network-online.target
@@ -59,8 +96,13 @@ crontab -e
 */2 * * * * /home/pi/cctv/check_camera.sh
 
 
+sudo apt update
+sudo apt upgrade
 
-
+PI
+~/cctv
+pip install flask
+sudo apt install python3-flask -y
 
 source /home/ops/PYEVO/bin/activate
 pip install python-dotenv
