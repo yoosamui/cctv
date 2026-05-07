@@ -7,6 +7,13 @@ import psutil
 from ultralytics import YOLO
 from queue import Queue
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import quote
+from dotenv import load_dotenv
+
+# Load the specific file path
+load_dotenv("/etc/cctv/credentials.env")
+CAM_PASS = os.getenv("CAM_PASS")
+password = quote(CAM_PASS)
 
 # --- NETWORK OPTIMIZATION ---
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;5000000"
@@ -14,19 +21,19 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;500000
 # --- CONFIG ---
 NODES = {
     "Gate": {
-        "cam_rtsp": "rtsp://admin:PASS@192.168.1.99:554/Streaming/channels/102",
+        "cam_rtsp": f"rtsp://yoo:{password}@192.168.1.99:554/Streaming/channels/102",
         "rpi_upload_url": "http://192.168.1.14:5000/upload"
     },
     "Center": {
-        "cam_rtsp": "rtsp://admin:PASS@192.168.1.82:554/Streaming/channels/102",
+        "cam_rtsp": f"rtsp://yoo:{password}@192.168.1.82:554/Streaming/channels/102",
         "rpi_upload_url": "http://192.168.1.13:5000/upload"
     },
     "Entrance": {
-        "cam_rtsp": "rtsp://admin:PASS@192.168.1.89:554/Streaming/channels/102",
+        "cam_rtsp": f"rtsp://yoo:{password}@192.168.1.89:554/Streaming/channels/102",
         "rpi_upload_url": "http://192.168.1.15:5000/upload"
     },
      "Garage": {
-        "cam_rtsp": "rtsp://admin:PASS@192.168.1.81:554/Streaming/channels/102",
+        "cam_rtsp": f"rtsp://yoo:{password}@192.168.1.81:554/Streaming/channels/102",
         "rpi_upload_url": "http://192.168.1.16:5000/upload"
     }
 }
@@ -216,11 +223,6 @@ try:
 
 except KeyboardInterrupt:
     print("\n[INFO] Shutting down...")
-
-
-
-
-
 
 
 
