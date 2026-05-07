@@ -57,3 +57,14 @@ Add cron:
 
 crontab -e
 */2 * * * * /home/pi/cctv/check_camera.sh
+
+
+
+
+
+source /home/ops/PYEVO/bin/activate
+pip install python-dotenv
+
+sudo chmod 644 /etc/cctv/credentials.env
+
+
