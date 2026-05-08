@@ -27,6 +27,7 @@ from threading import Thread, Lock
 import signal
 import sys
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 
 # ================= CONFIGURATION LOADING =================
@@ -78,6 +79,8 @@ current_video_prefix = ""  # Initialize empty
 prefix_lock = Lock()
 shutdown_flag = False
 shutdown_lock = Lock()  # Add lock for shutdown flag
+# Thread pool for file moves
+move_executor = ThreadPoolExecutor(max_workers=4)
 # =================================================
 
 os.makedirs(TEMP_DIR, exist_ok=True)
@@ -108,7 +111,7 @@ def get_camera_dir():
     today = datetime.now().strftime("%Y-%m-%d")
     camera_path = os.path.join(BASE_DIR, today, CAM_NAME)
     try:
-        os.makedirs(camera_path, mode=0o777, exist_ok=True)
+        os.makedirs(camera_path, mode=0o755, exist_ok=True)  # Changed from 0o777 to 0o755 for security
         return camera_path
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] DIR ERROR: {e}", flush=True)
@@ -144,6 +147,7 @@ def upload_image():
     """Receives detection images and enforces per-session limits."""
     global session_image_count, last_session_prefix
     
+    # Acquire lock for entire session check and update (CRITICAL FIX)
     with prefix_lock:
         # Check if recording has started
         if current_video_prefix == "":
@@ -156,10 +160,14 @@ def upload_image():
             last_session_prefix = current_prefix
             session_image_count = 0
             
-        # Check if we have already saved the max images for this segment
+        # Check limit inside the lock (CRITICAL FIX - moved from outside)
         if session_image_count >= MAX_IMAGES_PER_SESSION:
             return {"status": "ignored", "message": "Limit reached for this session"}, 200
+        
+        # Increment counter while still holding the lock (CRITICAL FIX)
+        session_image_count += 1
 
+    # Process the image upload (outside lock to minimize lock duration)
     if 'image' in request.files:
         file = request.files['image']
         target_dir = get_camera_dir()
@@ -171,10 +179,6 @@ def upload_image():
         
         try:
             file.save(save_path)
-            
-            with prefix_lock:
-                session_image_count += 1
-                
             print(f"[{datetime.now().strftime('%H:%M:%S')}] IMAGE SAVED ({session_image_count}/{MAX_IMAGES_PER_SESSION}): {save_path}", flush=True)
             return {"status": "success", "path": new_filename}, 200
         except Exception as e:
@@ -199,32 +203,32 @@ def move_to_share_background(local_path, start_epoch, filename):
             shutil.move(local_path, final_path)
             try:
                 os.utime(final_path, (start_epoch, start_epoch))
-            except:
+            except Exception:
+                # Silently fail if we can't set timestamps
                 pass
             print(f"[{datetime.now().strftime('%H:%M:%S')}] File moved to share: {filename}", flush=True)
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] BACKGROUND MOVE FAILED: {e}", flush=True)
 
 def kill_ffmpeg():
-    """Kill ffmpeg processes."""
+    """Kill ffmpeg processes for this camera only."""
     try:
-        subprocess.run(["pkill", "-9", "-f", "ffmpeg.*rtsp"], stderr=subprocess.DEVNULL)
+        # Kill only ffmpeg processes specific to this camera to avoid interfering with other instances
+        if CAM_NAME:
+            subprocess.run(["pkill", "-9", "-f", f"ffmpeg.*{CAM_NAME}"], stderr=subprocess.DEVNULL)
+        else:
+            subprocess.run(["pkill", "-9", "-f", "ffmpeg.*rtsp"], stderr=subprocess.DEVNULL)
         time.sleep(1)
-    except:
-        pass
-
-def run_cleanup_periodically(start_epoch):
-    """Run cleanup at consistent intervals."""
-    # Run cleanup every 10 segments
-    segment_number = int(start_epoch / SEGMENT_DURATION)
-    if segment_number % 10 == 0:
-        cleanup_old_folders(RETENTION_DAYS)
+    except Exception as e:
+        # Log but don't crash
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Warning: Could not kill ffmpeg: {e}", flush=True)
 
 def recording_loop():
-    """Main recording loop."""
+    """Main recording loop with improved error handling and thread pool."""
     global current_video_prefix, shutdown_flag
     consecutive_errors = 0
     last_cleanup_segment = -1
+    max_consecutive_errors = 10
     
     while True:
         with shutdown_lock:
@@ -237,41 +241,52 @@ def recording_loop():
         
         with prefix_lock:
             current_video_prefix = f"{timestamp}_{CAM_NAME}"
-            # current_prefix is not needed as separate variable
         
         filename = f"{current_video_prefix}.mp4"
         local_path = os.path.join(TEMP_DIR, filename)
         
+        # Quote URL for safety (CRITICAL FIX)
+        quoted_url = URL.replace('"', '\\"')
+        
         cmd = [
             "ffmpeg", "-hide_banner", "-loglevel", "error",
             "-rtsp_transport", "tcp", "-stimeout", "5000000",
-            "-i", URL, "-c:v", "copy", "-map", "0:v:0",
+            "-i", quoted_url, "-c:v", "copy", "-map", "0:v:0",
             "-t", str(SEGMENT_DURATION), "-reset_timestamps", "1",
             local_path
         ]
         
         try:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] RECORDING: {filename}", flush=True)
-            subprocess.run(cmd, check=True, timeout=SEGMENT_DURATION + 30)
+            result = subprocess.run(cmd, check=True, timeout=SEGMENT_DURATION + 30, capture_output=True, text=True)
             
-            if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-                # Use non-daemon thread to ensure completion
-                move_thread = Thread(target=move_to_share_background, 
-                                    args=(local_path, start_epoch, filename))
-                move_thread.daemon = False
-                move_thread.start()
-                consecutive_errors = 0
+            if result.returncode == 0 and os.path.exists(local_path) and os.path.getsize(local_path) > 0:
+                # Submit to thread pool instead of creating new threads (CRITICAL FIX)
+                move_executor.submit(move_to_share_background, local_path, start_epoch, filename)
+                consecutive_errors = max(0, consecutive_errors - 1)  # Decrease on success
             else:
-                print(f"[{datetime.now().strftime('%H:%M:%S')}] WARNING: Empty or missing file: {filename}", flush=True)
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] WARNING: Recording issue: {result.stderr if result.stderr else 'Unknown error'}", flush=True)
                 consecutive_errors += 1
-        except subprocess.TimeoutExpired:
+                
+        except subprocess.TimeoutExpired as e:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] RECORDING TIMEOUT: {filename}", flush=True)
             consecutive_errors += 1
-            time.sleep(min(10 * consecutive_errors, 60))
+            time.sleep(min(5 * consecutive_errors, 30))
+        except subprocess.CalledProcessError as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] FFMPEG ERROR (code {e.returncode}): {e.stderr if e.stderr else str(e)}", flush=True)
+            consecutive_errors += 1
+            time.sleep(min(5 * consecutive_errors, 30))
         except Exception as e:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] RECORDING ERROR: {e}", flush=True)
             consecutive_errors += 1
-            time.sleep(min(10 * consecutive_errors, 60))
+            time.sleep(min(5 * consecutive_errors, 30))
+        
+        # Reset consecutive errors if we've recovered
+        if consecutive_errors > max_consecutive_errors:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Too many consecutive errors ({consecutive_errors}), restarting...", flush=True)
+            consecutive_errors = 0
+            kill_ffmpeg()
+            time.sleep(10)
         
         # Run cleanup periodically
         current_segment = int(start_epoch / SEGMENT_DURATION)
@@ -280,14 +295,23 @@ def recording_loop():
             last_cleanup_segment = current_segment
 
 def signal_handler(signum, frame):
-    """Handle shutdown signals gracefully."""
+    """Handle shutdown signals gracefully without deadlocks."""
     global shutdown_flag
     print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received signal {signum}, shutting down...", flush=True)
-    with shutdown_lock:
-        shutdown_flag = True
+    
+    # Set the flag without holding lock to avoid deadlock (CRITICAL FIX)
+    shutdown_flag = True
+    
+    # Give recording loop time to exit gracefully
+    time.sleep(1)
+    
+    # Kill ffmpeg
     kill_ffmpeg()
-    # Give ffmpeg and move threads a moment to clean up
-    time.sleep(2)
+    
+    # Shutdown thread pool properly (CRITICAL FIX)
+    move_executor.shutdown(wait=True, timeout=5.0)
+    
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Cleanup complete", flush=True)
     sys.exit(0)
 
 if __name__ == "__main__":
@@ -299,15 +323,21 @@ if __name__ == "__main__":
     if not validate_rtsp_url(URL):
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Warning: URL validation failed, but continuing...", flush=True)
     
+    # Set up signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # Kill process on configured port
+    # Kill process on configured port - with better error handling
     try:
-        subprocess.run(["fuser", "-k", f"{FLASK_PORT}/tcp"], stderr=subprocess.DEVNULL)
-        time.sleep(1)
-    except:
-        pass
+        result = subprocess.run(["fuser", f"{FLASK_PORT}/tcp"], capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Warning: Port {FLASK_PORT} is in use. Attempting to kill...", flush=True)
+            subprocess.run(["fuser", "-k", f"{FLASK_PORT}/tcp"], stderr=subprocess.DEVNULL)
+            time.sleep(1)
+    except FileNotFoundError:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Warning: 'fuser' command not found. Port {FLASK_PORT} might be in use.", flush=True)
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Warning: Could not check port {FLASK_PORT}: {e}", flush=True)
     
     print(f"Starting CCTV Recorder for: {CAM_NAME}")
     print(f"Recording to: {BASE_DIR}")
@@ -327,5 +357,5 @@ if __name__ == "__main__":
     finally:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Cleaning up...", flush=True)
         kill_ffmpeg()
+        move_executor.shutdown(wait=True, timeout=3.0)
         print(f"[{datetime.now().strftime('%H:%M:%S')}] Shutdown complete", flush=True)
-        
