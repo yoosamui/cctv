@@ -26,6 +26,7 @@ from flask import Flask, request
 from threading import Thread, Lock
 import signal
 import sys
+import re
 
 
 # ================= CONFIGURATION LOADING =================
@@ -54,6 +55,10 @@ MAX_IMAGES_PER_SESSION = config.getint('RECORDING', 'max_images_per_session', fa
 # Network Settings
 FLASK_PORT = config.getint('NETWORK', 'flask_port', fallback=5000)
 
+# Validate critical configuration
+if SEGMENT_DURATION <= 0:
+    print(f"ERROR: segment_duration must be positive, got {SEGMENT_DURATION}")
+    sys.exit(1)
 
 print(f" * Segment duration = {SEGMENT_DURATION}")
 print(f" * Max images per session = {MAX_IMAGES_PER_SESSION}")
@@ -69,9 +74,10 @@ CAM_NAME = None
 URL = None
 session_image_count = 0
 last_session_prefix = ""
-current_video_prefix = ""
+current_video_prefix = ""  # Initialize empty
 prefix_lock = Lock()
 shutdown_flag = False
+shutdown_lock = Lock()  # Add lock for shutdown flag
 # =================================================
 
 os.makedirs(TEMP_DIR, exist_ok=True)
@@ -89,16 +95,28 @@ def parse_arguments():
     
     return parser.parse_args()
 
+def validate_rtsp_url(url):
+    """Validate RTSP URL format."""
+    rtsp_pattern = re.compile(r'^rtsp://.*:\d+/.*', re.IGNORECASE)
+    if not rtsp_pattern.match(url):
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] WARNING: URL doesn't appear to be a valid RTSP URL: {url[:50]}...", flush=True)
+        return False
+    return True
+
 def get_camera_dir():
     """Returns camera-specific folder path: BASE_DIR/YYYY-MM-DD/CAM_NAME/"""
     today = datetime.now().strftime("%Y-%m-%d")
     camera_path = os.path.join(BASE_DIR, today, CAM_NAME)
     try:
         os.makedirs(camera_path, mode=0o777, exist_ok=True)
+        return camera_path
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] DIR ERROR: {e}", flush=True)
-        return BASE_DIR
-    return camera_path
+        # Create fallback in temp directory if base dir fails
+        fallback_path = os.path.join(TEMP_DIR, f"fallback_{CAM_NAME}_{today}")
+        os.makedirs(fallback_path, exist_ok=True)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Using fallback directory: {fallback_path}", flush=True)
+        return fallback_path
 
 def cleanup_old_folders(days):
     """Cleanup old history from the share."""
@@ -127,6 +145,10 @@ def upload_image():
     global session_image_count, last_session_prefix
     
     with prefix_lock:
+        # Check if recording has started
+        if current_video_prefix == "":
+            return {"status": "error", "message": "Recording not started yet"}, 503
+            
         current_prefix = current_video_prefix
         
         # If the video file name has changed, it's a new "Session"
@@ -141,7 +163,8 @@ def upload_image():
     if 'image' in request.files:
         file = request.files['image']
         target_dir = get_camera_dir()
-        actual_time = datetime.now().strftime("%H-%M-%S")
+        # Add microseconds to avoid collisions
+        actual_time = datetime.now().strftime("%H-%M-%S-%f")[:-3]  # Keep milliseconds
         
         new_filename = f"{current_prefix}_DETECTION_{actual_time}.jpg"
         save_path = os.path.join(target_dir, new_filename)
@@ -190,21 +213,33 @@ def kill_ffmpeg():
     except:
         pass
 
+def run_cleanup_periodically(start_epoch):
+    """Run cleanup at consistent intervals."""
+    # Run cleanup every 10 segments
+    segment_number = int(start_epoch / SEGMENT_DURATION)
+    if segment_number % 10 == 0:
+        cleanup_old_folders(RETENTION_DAYS)
+
 def recording_loop():
     """Main recording loop."""
     global current_video_prefix, shutdown_flag
     consecutive_errors = 0
+    last_cleanup_segment = -1
     
-    while not shutdown_flag:
+    while True:
+        with shutdown_lock:
+            if shutdown_flag:
+                break
+        
         kill_ffmpeg()
         start_epoch = time.time()
         timestamp = datetime.fromtimestamp(start_epoch).strftime("%Y-%m-%d_%H-%M-%S")
         
         with prefix_lock:
             current_video_prefix = f"{timestamp}_{CAM_NAME}"
-            current_prefix = current_video_prefix
+            # current_prefix is not needed as separate variable
         
-        filename = f"{current_prefix}.mp4"
+        filename = f"{current_video_prefix}.mp4"
         local_path = os.path.join(TEMP_DIR, filename)
         
         cmd = [
@@ -220,24 +255,39 @@ def recording_loop():
             subprocess.run(cmd, check=True, timeout=SEGMENT_DURATION + 30)
             
             if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-                Thread(target=move_to_share_background, 
-                       args=(local_path, start_epoch, filename),
-                       daemon=True).start()
+                # Use non-daemon thread to ensure completion
+                move_thread = Thread(target=move_to_share_background, 
+                                    args=(local_path, start_epoch, filename))
+                move_thread.daemon = False
+                move_thread.start()
                 consecutive_errors = 0
             else:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] WARNING: Empty or missing file: {filename}", flush=True)
                 consecutive_errors += 1
+        except subprocess.TimeoutExpired:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] RECORDING TIMEOUT: {filename}", flush=True)
+            consecutive_errors += 1
+            time.sleep(min(10 * consecutive_errors, 60))
         except Exception as e:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] RECORDING ERROR: {e}", flush=True)
             consecutive_errors += 1
             time.sleep(min(10 * consecutive_errors, 60))
         
-        if int(start_epoch) % (SEGMENT_DURATION * 10) < SEGMENT_DURATION:
+        # Run cleanup periodically
+        current_segment = int(start_epoch / SEGMENT_DURATION)
+        if current_segment != last_cleanup_segment and current_segment % 10 == 0:
             cleanup_old_folders(RETENTION_DAYS)
+            last_cleanup_segment = current_segment
 
 def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully."""
     global shutdown_flag
-    shutdown_flag = True
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Received signal {signum}, shutting down...", flush=True)
+    with shutdown_lock:
+        shutdown_flag = True
     kill_ffmpeg()
+    # Give ffmpeg and move threads a moment to clean up
+    time.sleep(2)
     sys.exit(0)
 
 if __name__ == "__main__":
@@ -245,24 +295,37 @@ if __name__ == "__main__":
     CAM_NAME = args.name
     URL = args.url
     
+    # Validate URL
+    if not validate_rtsp_url(URL):
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Warning: URL validation failed, but continuing...", flush=True)
+    
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # Kill process on config port
+    # Kill process on configured port
     try:
-        #subprocess.run(["fuser", "-k", "5000/tcp"], stderr=subprocess.DEVNULL)
         subprocess.run(["fuser", "-k", f"{FLASK_PORT}/tcp"], stderr=subprocess.DEVNULL)
         time.sleep(1)
     except:
         pass
     
     print(f"Starting CCTV Recorder for: {CAM_NAME}")
+    print(f"Recording to: {BASE_DIR}")
+    print(f"API endpoint: http://0.0.0.0:{FLASK_PORT}/upload")
+    
     server_thread = Thread(target=run_flask, daemon=True)
     server_thread.start()
     
     try:
         recording_loop()
+    except KeyboardInterrupt:
+        print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Keyboard interrupt received", flush=True)
     except Exception as e:
-        print(f"CRITICAL ERROR: {e}")
+        print(f"CRITICAL ERROR: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
     finally:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Cleaning up...", flush=True)
         kill_ffmpeg()
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] Shutdown complete", flush=True)
+        
