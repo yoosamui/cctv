@@ -20,31 +20,55 @@ import os
 import shutil
 import logging
 import argparse
+import configparser
 from datetime import datetime
 from flask import Flask, request
 from threading import Thread, Lock
 import signal
 import sys
 
+
+# ================= CONFIGURATION LOADING =================
+config = configparser.ConfigParser()
+config_file = os.path.join(os.path.dirname(__file__), 'config.ini')
+
+def load_config():
+    """Reads settings from config.ini with fallback defaults."""
+    if not os.path.exists(config_file):
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] ERROR: {config_file} not found!")
+        sys.exit(1)
+    config.read(config_file)
+
+load_config()
+print(" * Configuration loaded successfully.")
+
+# Storage Settings
+BASE_DIR = config.get('STORAGE', 'base_dir', fallback='/media/share/cameras/cctv-storage')
+TEMP_DIR = config.get('STORAGE', 'temp_dir', fallback='/tmp/cctv_staging')
+RETENTION_DAYS = config.getint('STORAGE', 'retention_days', fallback=7)
+
+# Recording Settings
+SEGMENT_DURATION = config.getint('RECORDING', 'segment_duration', fallback=300)
+MAX_IMAGES_PER_SESSION = config.getint('RECORDING', 'max_images_per_session', fallback=3)
+
+# Network Settings
+FLASK_PORT = config.getint('NETWORK', 'flask_port', fallback=5000)
+
+
+print(f" * Segment duration = {SEGMENT_DURATION}")
+print(f" * Max images per session = {MAX_IMAGES_PER_SESSION}")
+print(f" * Retention days = {RETENTION_DAYS}")
+
 # ================= SILENCE FLASK LOGS =================
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.INFO)
 # ======================================================
 
-# ================= GLOBAL VARIABLES =================
+# ================= GLOBAL STATE =================
 CAM_NAME = None
 URL = None
-BASE_DIR = "/media/share/cameras/cctv-storage" 
-TEMP_DIR = "/tmp/cctv_staging"
-RETENTION_DAYS = 7
-SEGMENT_DURATION = 300  # 5 minutes
-
-# Session Control Variables
-MAX_IMAGES_PER_SESSION = 3
 session_image_count = 0
 last_session_prefix = ""
-
-# Global tracker with thread safety
 current_video_prefix = ""
 prefix_lock = Lock()
 shutdown_flag = False
@@ -138,7 +162,7 @@ def upload_image():
 def run_flask():
     """Run Flask server."""
     try:
-        app.run(host="0.0.0.0", port=5000, debug=False, use_reloader=False, threaded=True)
+        app.run(host="0.0.0.0", port=FLASK_PORT, debug=False, use_reloader=False, threaded=True)
     except Exception as e:
         print(f"[{datetime.now().strftime('%H:%M:%S')}] FLASK ERROR: {e}", flush=True)
 
@@ -224,8 +248,10 @@ if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
+    # Kill process on config port
     try:
-        subprocess.run(["fuser", "-k", "5000/tcp"], stderr=subprocess.DEVNULL)
+        #subprocess.run(["fuser", "-k", "5000/tcp"], stderr=subprocess.DEVNULL)
+        subprocess.run(["fuser", "-k", f"{FLASK_PORT}/tcp"], stderr=subprocess.DEVNULL)
         time.sleep(1)
     except:
         pass

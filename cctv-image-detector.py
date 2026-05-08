@@ -14,7 +14,6 @@ from dotenv import load_dotenv
 load_dotenv("/etc/cctv/credentials.env")
 CAM_PASS = os.getenv("CAM_PASS")
 password = quote(CAM_PASS)
-#print(f"PASSWORD=[{password}]")
 
 # --- NETWORK OPTIMIZATION ---
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;5000000"
@@ -155,7 +154,7 @@ try:
             results = model.predict(
                 raw_frame,
                 imgsz=416,
-                conf=0.35,
+                conf=0.40,
                 classes=[0],
                 verbose=False
             )
