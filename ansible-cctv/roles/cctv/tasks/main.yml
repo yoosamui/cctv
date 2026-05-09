@@ -1,0 +1,28 @@
+---
+- name: Debug Camera Name
+  debug:
+    msg: "Attempting to start service for camera: {{ cam_name }}"
+
+
+- name: Ensure git is installed
+  become: yes
+  apt:
+    name: git
+    state: present
+    update_cache: yes
+
+- name: Clone or update CCTV repository
+  git:
+    repo: "{{ git_repo }}"
+    dest: "{{ git_dest }}"
+    version: main
+    force: yes
+
+- name: Restart CCTV recorder service
+  become: yes
+  systemd:
+    name: "cctv-video-recorder@{{ cam_name }}.service"
+    state: restarted
+    enabled: yes
+    daemon_reload: yes
+
