@@ -1,0 +1,5 @@
+ansible_user: pi
+ansible_python_interpreter: /usr/bin/python3
+
+git_repo: "https://github.com/yoosamui/cctv.git"
+git_dest: "/home/pi/cctv"

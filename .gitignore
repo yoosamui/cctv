@@ -1,6 +1,7 @@
 # Byte-compiled / optimized / DLL files
 *_BAK
 *.txt
+*.yml
 *.env
 *.conf
 __pycache__/
