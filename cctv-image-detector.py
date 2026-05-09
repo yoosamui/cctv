@@ -11,7 +11,7 @@ from urllib.parse import quote
 from dotenv import load_dotenv
 import datetime
 from threading import Lock
-
+VERSION="1.5"
 # --- CREDENTIALS LOADING ---
 # Ensure this path is correct for your environment
 load_dotenv("/etc/cctv/credentials.env")
