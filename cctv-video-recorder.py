@@ -111,7 +111,7 @@ def upload_image():
         
         try:
             file.save(save_path)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] IMAGE SAVED ({session_image_count}/{MAX_IMAGES_PER_SESSION}): {new_filename}", flush=True)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚡IMAGE SAVED ({session_image_count}/{MAX_IMAGES_PER_SESSION}): {new_filename}", flush=True)
             return {"status": "success", "path": new_filename}, 200
         except Exception as e:
             return {"status": "error", "message": str(e)}, 500
