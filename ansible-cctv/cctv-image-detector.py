@@ -1,5 +1,5 @@
 # ==========================================
-# CCTV IMAGE DETECTOR - VERSION 3.16
+# CCTV IMAGE DETECTOR - VERSION 3.16.1
 # FIXED: CPU SPIKE & LOGGING CRASH
 # ==========================================
 
@@ -15,6 +15,7 @@ from queue import Empty
 from urllib.parse import quote
 from dotenv import load_dotenv
 
+VERSION = "3.16.1"
 
 # This tells FFmpeg to only show "Panic" errors and hide "Errors" or "Warnings"
 os.environ['OPENCV_LOG_LEVEL'] = 'OFF'
@@ -43,6 +44,8 @@ COOLDOWN = 4.0           # Spacing between images
 
 def draw_and_upload(camera_name, url, frame, detections, ts):
     """Draws boxes and uploads in a background thread."""
+    #print(f"[{ts}] Detections: {len(detections)}")
+
     yellow = (0, 255, 255)
     for d in detections:
         x1, y1, x2, y2 = d["box"]
@@ -93,7 +96,7 @@ if __name__ == "__main__":
     streams = {n: CameraStream(n, cfg["cam_rtsp"]) for n, cfg in NODES.items()}
     last_run, last_upload, counts = {n:0 for n in NODES}, {n:0 for n in NODES}, {n:0 for n in NODES}
     
-    print("--- SYSTEM 3.16 STARTED (STABLE LOG MODE) ---")
+    print(f"--- yoosamui cctv-image-detector SYSTEM {VERSION} STARTED (STABLE ) ---")
 
     while True:
         now = time.time()
