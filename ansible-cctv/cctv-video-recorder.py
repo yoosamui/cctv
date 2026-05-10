@@ -20,6 +20,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 VERSION = "1.5"
 
+
 # ================= CONFIGURATION LOADING =================
 config = configparser.ConfigParser()
 config_file = os.path.join(os.path.dirname(__file__), 'config.ini')
@@ -46,7 +47,7 @@ CAM_NAME = None
 URL = None
 session_image_count = 0
 last_session_prefix = ""
-current_video_prefix = ""
+current_video_prefix = "" #"INITIALIZING_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
 prefix_lock = Lock()
 shutdown_flag = False
 shutdown_lock = Lock()
@@ -57,8 +58,8 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 app = Flask(__name__)
 
 # Silence Flask logs
-log = logging.getLogger('werkzeug')
-log.setLevel(logging.ERROR)
+#log = logging.getLogger('werkzeug')
+#log.setLevel(logging.ERROR)
 
 def get_camera_dir():
     """Returns camera-specific folder path."""
@@ -67,61 +68,62 @@ def get_camera_dir():
     os.makedirs(camera_path, mode=0o755, exist_ok=True)
     return camera_path
 
+
+
+@app.route("/ping")
+def ping():
+    return f"I am alive! Camera: {CAM_NAME}", 200
+
+
 @app.route("/upload", methods=["POST"])
 def upload_image():
-    """Receives detection images and enforces per-session limits."""
     global session_image_count, last_session_prefix
     
+    # 1. IMMEDIATE LOGGING (Move this to the very top)
+    print(f"⚡ --- [REQUEST RECEIVED] --- {datetime.now().strftime('%H:%M:%S')}")
+
     with prefix_lock:
-        if current_video_prefix == "":
-            return {"status": "error", "message": "Recording not started yet"}, 503
-            
+        # 2. Check if prefix exists
+        if not current_video_prefix:
+            print("!!! REJECTED: current_video_prefix is EMPTY")
+            return {"status": "error", "message": "Recording not active"}, 503
+
         current_prefix = current_video_prefix
-        
-        # New session detection
+
+        # 3. New session detection
         if current_prefix != last_session_prefix:
+            print(f"--- NEW VIDEO SEGMENT: {current_prefix} ---")
             last_session_prefix = current_prefix
             session_image_count = 0
 
-        # ENFORCE LIMIT: Send error if threshold reached
+        # 4. Limit Check
         if session_image_count >= MAX_IMAGES_PER_SESSION:
-            print(f"Limit reached ({MAX_IMAGES_PER_SESSION}). No more images accepted.")
+            print(f"!!! REJECTED: Limit {MAX_IMAGES_PER_SESSION} reached")
+            return {"status": "error", "message": "Limit reached"}, 429 
 
-          # Calculate elapsed time directly
-            now = datetime.now().timestamp()
-            duration_secs = int(now - video_start_time_secs)
-
-          # Safety clamp: if the segment is unexpectedly long, 
-          # we cap it so the detector doesn't look too far ahead.
-            if duration_secs > SEGMENT_DURATION:
-                duration_secs = abs(SEGMENT_DURATION - 30)
-
-            print(f"duration_secs = {duration_secs}")
-
-
-            return {
-                "status": "error","duration_secs": duration_secs,
-                "message": f"Limit reached ({MAX_IMAGES_PER_SESSION}). No more images accepted."
-            }, 429 
-        
         session_image_count += 1
 
+    # 5. File Processing
     if 'image' in request.files:
         file = request.files['image']
         target_dir = get_camera_dir()
         actual_time = datetime.now().strftime("%H-%M-%S-%f")[:-3]
-        
         new_filename = f"{current_prefix}_DETECTION_{actual_time}.jpg"
         save_path = os.path.join(target_dir, new_filename)
-        
+
         try:
             file.save(save_path)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] IMAGE SAVED ({session_image_count}/{MAX_IMAGES_PER_SESSION}): {new_filename}", flush=True)
+            print(f"[SUCCESS] Saved: {new_filename}") # LOUDER PRINT
             return {"status": "success", "path": new_filename}, 200
         except Exception as e:
+            print(f"!!! SAVE ERROR: {e}")
+            with prefix_lock: session_image_count -= 1
             return {"status": "error", "message": str(e)}, 500
 
+    print("!!! REJECTED: No image in request.files")
     return {"status": "error", "message": "No image part"}, 400
+
+
 
 def run_flask():
     app.run(host="0.0.0.0", port=FLASK_PORT, debug=False, use_reloader=False, threaded=True)
