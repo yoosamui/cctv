@@ -18,6 +18,18 @@
     version: main
     force: yes
 
+# --- NEW TASK: Deploy config.ini ---
+- name: Deploy CCTV configuration
+  copy:
+    src: "../config.ini"        # Make sure this file is in your Ansible project folder
+    dest: "/home/pi/cctv/config.ini"
+    owner: pi
+    group: pi
+    mode: '0644'
+  register: config_file        # We track if the file changed
+
+
+
 - name: Restart CCTV recorder service
   become: yes
   systemd:

@@ -74,6 +74,10 @@ def get_camera_dir():
 # ================= AI ANALYZER TRIGGER =================
 def send_to_analyzer(file_path):
     """Sends a POST request to the laptop to start AI analysis."""
+<<<<<<< HEAD
+=======
+    """
+>>>>>>> current
     payload = {
         "camera_name": CAM_NAME,
         "file_path": file_path
@@ -87,6 +91,10 @@ def send_to_analyzer(file_path):
             print(f"AI Error: Laptop returned {response.status_code}")
     except Exception as e:
         print(f"Could not connect to AI Laptop: {e}")
+<<<<<<< HEAD
+=======
+    """
+>>>>>>> current
 
 @app.route("/upload", methods=["POST"])
 def upload_image():
