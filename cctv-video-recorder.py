@@ -1,7 +1,7 @@
 """
 CCTV Recorder with Person Detection
 ====================================
-Version: 1.7 - Integrated AI Analysis Trigger
+Version: 1.7.1 - Integrated AI Analysis Trigger
 """
 
 import subprocess
@@ -20,7 +20,7 @@ import sys
 import re
 from concurrent.futures import ThreadPoolExecutor
 
-VERSION = "1.7"
+VERSION = "1.7.1"
 
 # ================= CONFIGURATION LOADING =================
 config = configparser.ConfigParser()
@@ -74,10 +74,11 @@ def get_camera_dir():
 # ================= AI ANALYZER TRIGGER =================
 def send_to_analyzer(file_path):
     """Sends a POST request to the laptop to start AI analysis."""
-<<<<<<< HEAD
-=======
+
+
+
     """
->>>>>>> current
+
     payload = {
         "camera_name": CAM_NAME,
         "file_path": file_path
@@ -91,10 +92,7 @@ def send_to_analyzer(file_path):
             print(f"AI Error: Laptop returned {response.status_code}")
     except Exception as e:
         print(f"Could not connect to AI Laptop: {e}")
-<<<<<<< HEAD
-=======
     """
->>>>>>> current
 
 @app.route("/upload", methods=["POST"])
 def upload_image():
