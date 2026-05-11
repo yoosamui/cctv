@@ -1,7 +1,7 @@
 """
 CCTV Recorder with Person Detection
 ====================================
-Version: 1.6 - Strict Limit Enforcement
+Version: 1.7 - Integrated AI Analysis Trigger
 """
 
 import subprocess
@@ -11,6 +11,7 @@ import shutil
 import logging
 import argparse
 import configparser
+import requests  # Added for AI Trigger
 from datetime import datetime
 from flask import Flask, request
 from threading import Thread, Lock
@@ -18,8 +19,8 @@ import signal
 import sys
 import re
 from concurrent.futures import ThreadPoolExecutor
-VERSION = "1.5"
 
+VERSION = "1.7"
 
 # ================= CONFIGURATION LOADING =================
 config = configparser.ConfigParser()
@@ -41,13 +42,15 @@ RETENTION_DAYS = config.getint('STORAGE', 'retention_days', fallback=7)
 SEGMENT_DURATION = config.getint('RECORDING', 'segment_duration', fallback=300)
 MAX_IMAGES_PER_SESSION = config.getint('RECORDING', 'max_images_per_session', fallback=3)
 FLASK_PORT = config.getint('NETWORK', 'flask_port', fallback=5000)
+# AI Laptop Address
+AI_ANALYZER_URL = "http://192.168.1.103:8080/analyze"
 
 # ================= GLOBAL STATE =================
 CAM_NAME = None
 URL = None
 session_image_count = 0
 last_session_prefix = ""
-current_video_prefix = "" #"INITIALIZING_" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+current_video_prefix = ""
 prefix_lock = Lock()
 shutdown_flag = False
 shutdown_lock = Lock()
@@ -58,8 +61,8 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 app = Flask(__name__)
 
 # Silence Flask logs
-#log = logging.getLogger('werkzeug')
-#log.setLevel(logging.ERROR)
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
 def get_camera_dir():
     """Returns camera-specific folder path."""
@@ -68,73 +71,81 @@ def get_camera_dir():
     os.makedirs(camera_path, mode=0o755, exist_ok=True)
     return camera_path
 
-
-
-@app.route("/ping")
-def ping():
-    return f"I am alive! Camera: {CAM_NAME}", 200
-
+# ================= AI ANALYZER TRIGGER =================
+def send_to_analyzer(file_path):
+    """Sends a POST request to the laptop to start AI analysis."""
+    payload = {
+        "camera_name": CAM_NAME,
+        "file_path": file_path
+    }
+    try:
+        # Short timeout to avoid blocking the recorder
+        response = requests.post(AI_ANALYZER_URL, json=payload, timeout=5)
+        if response.status_code == 200:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🤖 AI Analysis queued for {CAM_NAME}")
+        else:
+            print(f"AI Error: Laptop returned {response.status_code}")
+    except Exception as e:
+        print(f"Could not connect to AI Laptop: {e}")
 
 @app.route("/upload", methods=["POST"])
 def upload_image():
+    """Receives detection images and enforces per-session limits."""
     global session_image_count, last_session_prefix
     
-    # 1. IMMEDIATE LOGGING (Move this to the very top)
-    print(f"⚡ --- [REQUEST RECEIVED] --- {datetime.now().strftime('%H:%M:%S')}")
-
     with prefix_lock:
-        # 2. Check if prefix exists
-        if not current_video_prefix:
-            print("!!! REJECTED: current_video_prefix is EMPTY")
-            return {"status": "error", "message": "Recording not active"}, 503
-
+        if current_video_prefix == "":
+            return {"status": "error", "message": "Recording not started yet"}, 503
+            
         current_prefix = current_video_prefix
-
-        # 3. New session detection
+        
         if current_prefix != last_session_prefix:
-            print(f"--- NEW VIDEO SEGMENT: {current_prefix} ---")
             last_session_prefix = current_prefix
             session_image_count = 0
 
-        # 4. Limit Check
         if session_image_count >= MAX_IMAGES_PER_SESSION:
-            print(f"!!! REJECTED: Limit {MAX_IMAGES_PER_SESSION} reached")
-            return {"status": "error", "message": "Limit reached"}, 429 
-
+            now = datetime.now().timestamp()
+            duration_secs = abs(int(0 - (now - video_start_time_secs)))
+            if duration_secs > 300:
+                duration_secs = 200
+            return {
+                "status": "error","duration_secs": duration_secs,
+                "message": f"Limit reached ({MAX_IMAGES_PER_SESSION})."
+            }, 429 
+        
         session_image_count += 1
 
-    # 5. File Processing
     if 'image' in request.files:
         file = request.files['image']
         target_dir = get_camera_dir()
         actual_time = datetime.now().strftime("%H-%M-%S-%f")[:-3]
+        
         new_filename = f"{current_prefix}_DETECTION_{actual_time}.jpg"
         save_path = os.path.join(target_dir, new_filename)
-
+        
         try:
             file.save(save_path)
-            print(f"[SUCCESS] Saved: {new_filename}") # LOUDER PRINT
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚡IMAGE SAVED ({session_image_count}/{MAX_IMAGES_PER_SESSION})", flush=True)
             return {"status": "success", "path": new_filename}, 200
         except Exception as e:
-            print(f"!!! SAVE ERROR: {e}")
-            with prefix_lock: session_image_count -= 1
             return {"status": "error", "message": str(e)}, 500
 
-    print("!!! REJECTED: No image in request.files")
     return {"status": "error", "message": "No image part"}, 400
-
-
 
 def run_flask():
     app.run(host="0.0.0.0", port=FLASK_PORT, debug=False, use_reloader=False, threaded=True)
 
-def move_to_share_background(local_path, start_epoch, filename):
+def move_to_share_background(local_path, filename):
     try:
         final_dir = get_camera_dir()
         final_path = os.path.join(final_dir, filename)
         if os.path.exists(local_path):
             shutil.move(local_path, final_path)
             print(f"[{datetime.now().strftime('%H:%M:%S')}] File moved to share: {filename}", flush=True)
+            
+            # TRIGGER AI ANALYSIS NOW
+            send_to_analyzer(final_path)
+            
     except Exception as e:
         print(f"BACKGROUND MOVE FAILED: {e}", flush=True)
 
@@ -143,7 +154,7 @@ def kill_ffmpeg():
         subprocess.run(["pkill", "-9", "-f", f"ffmpeg.*{CAM_NAME}"], stderr=subprocess.DEVNULL)
 
 def recording_loop():
-    global current_video_prefix, shutdown_flag
+    global current_video_prefix, shutdown_flag, video_start_time_secs
     last_cleanup_segment = -1
     
     while not shutdown_flag:
@@ -151,7 +162,6 @@ def recording_loop():
         start_epoch = time.time()
         timestamp = datetime.fromtimestamp(start_epoch).strftime("%Y-%m-%d_%H-%M-%S")
         video_start_time_secs = datetime.now().timestamp()
-
 
         with prefix_lock:
             current_video_prefix = f"{timestamp}_{CAM_NAME}"
@@ -173,15 +183,11 @@ def recording_loop():
             subprocess.run(cmd, check=True, timeout=SEGMENT_DURATION + 30)
             
             if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-                move_executor.submit(move_to_share_background, local_path, start_epoch, filename)
+                # Passing filename to move and then trigger analysis
+                move_executor.submit(move_to_share_background, local_path, filename)
         except Exception as e:
             print(f"RECORDING ERROR: {e}", flush=True)
             time.sleep(5)
-        
-        # Periodic cleanup
-        current_segment = int(start_epoch / SEGMENT_DURATION)
-        if current_segment != last_cleanup_segment and current_segment % 10 == 0:
-            last_cleanup_segment = current_segment
 
 def signal_handler(signum, frame):
     global shutdown_flag
