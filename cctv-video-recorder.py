@@ -75,7 +75,10 @@ def get_camera_dir():
 def send_to_analyzer(file_path):
     """Sends a POST request to the laptop to start AI analysis."""
 
+
+
     """
+
     payload = {
         "camera_name": CAM_NAME,
         "file_path": file_path
