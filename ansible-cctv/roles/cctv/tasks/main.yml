@@ -19,7 +19,7 @@
     force: yes
 
 # --- NEW TASK: Deploy config.ini ---
-- name: Deploy CCTV configuration
+- name: copy CCTV configuration
   copy:
     src: "../config.ini"        # Make sure this file is in your Ansible project folder
     dest: "/home/pi/cctv/config.ini"
