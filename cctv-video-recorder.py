@@ -73,23 +73,34 @@ def get_camera_dir():
 
 # ================= AI ANALYZER TRIGGER =================
 def send_to_analyzer(file_path):
-    """Sends a POST request to the laptop to start AI analysis."""
+    import requests
+    import os
 
-    """
-    payload = {
-        "camera_name": CAM_NAME,
-        "file_path": file_path
-    }
+    # Get camera name from environment variable or use hardcoded value
+    camera_name = CAM_NAME #os.getenv('CAMERA_NAME', CAM_NAME)  # CAM_NAME should be defined at top of file
+    
+    # CORRECT POST FORMAT
+    url = "http://192.168.1.103:5001/session-reset"  # Your laptop IP
+    headers = {'Content-Type': 'application/json'}
+    payload = {"camera": camera_name}
+    
     try:
-        # Short timeout to avoid blocking the recorder
-        response = requests.post(AI_ANALYZER_URL, json=payload, timeout=5)
+        response = requests.post(url, json=payload, headers=headers, timeout=2)
+        print(f"POST response: {response.status_code} - {response.text}")
+
         if response.status_code == 200:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🤖 AI Analysis queued for {CAM_NAME}")
+            print(f"✅ {camera_name} session reset confirmed")
+            return True
         else:
-            print(f"AI Error: Laptop returned {response.status_code}")
+            print(f"❌ Failed: {response.status_code}")
+            return False
+
     except Exception as e:
-        print(f"Could not connect to AI Laptop: {e}")
-    """
+        print(f"Error: {e}")
+        return False
+
+
+
 
 @app.route("/upload", methods=["POST"])
 def upload_image():
