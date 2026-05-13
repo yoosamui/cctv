@@ -19,6 +19,8 @@ import signal
 import sys
 import re
 from concurrent.futures import ThreadPoolExecutor
+from dotenv import load_dotenv
+
 
 VERSION = "1.7.1"
 
@@ -44,7 +46,16 @@ MAX_IMAGES_PER_SESSION = config.getint('RECORDING', 'max_images_per_session', fa
 FLASK_PORT = config.getint('NETWORK', 'flask_port', fallback=5000)
 # AI Laptop Address
 AI_ANALYZER_URL = "http://192.168.1.103:8080/analyze"
+# ==========================================
+# AUTHENTICATION
+# ==========================================
+load_dotenv("/etc/cctv/credentials.env")
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+if not WEBHOOK_SECRET:
+    print("ERROR: WEBHOOK_SECRET not found!")
+    sys.exit(1)
 
+#WEBHOOK_SECRET ="de31aba50e7d4d2baafa405fb15e1304b01c67e6d783db3b6aeb48bbc7a2c245"
 # ================= GLOBAL STATE =================
 CAM_NAME = None
 URL = None
@@ -72,6 +83,7 @@ def get_camera_dir():
     return camera_path
 
 # ================= AI ANALYZER TRIGGER =================
+"""
 def send_to_analyzer(file_path):
     import requests
     import os
@@ -99,7 +111,48 @@ def send_to_analyzer(file_path):
         print(f"Error: {e}")
         return False
 
+"""
 
+def send_to_analyzer(file_path):
+    import requests
+    import os
+
+    # Get camera name from environment variable or use hardcoded value
+    camera_name = CAM_NAME  # CAM_NAME should be defined at top of file
+    
+    # Your laptop IP
+    url = "http://192.168.1.103:5001/session-reset"
+    
+    # IMPORTANT: This must match the WEBHOOK_SECRET in your detector's .env file
+#    WEBHOOK_SECRET = "de31aba50e7d4d2baafa405fb15e1304b01c67e6d783db3b6aeb48bbc7a2c245"
+#os.getenv('WEBHOOK_SECRET', 'your-strong-random-secret-here')
+    
+    headers = {
+        'Content-Type': 'application/json',
+        'X-API-KEY': WEBHOOK_SECRET  # Add authentication header
+    }
+    payload = {"camera": camera_name}
+    
+    try:
+        response = requests.post(url, json=payload, headers=headers, timeout=2)
+        print(f"POST response: {response.status_code}")
+        
+        if response.status_code == 200:
+            print(f"✅ {camera_name} session reset confirmed")
+            return True
+        elif response.status_code == 401:
+            print(f"❌ Authentication failed - Check WEBHOOK_SECRET matches detector")
+            return False
+        else:
+            print(f"❌ Failed: {response.status_code} - {response.text}")
+            return False
+
+    except requests.exceptions.Timeout:
+        print(f"⚠️ Timeout connecting to analyzer at {url}")
+        return False
+    except Exception as e:
+        print(f"Error: {e}")
+        return False
 
 
 @app.route("/upload", methods=["POST"])
