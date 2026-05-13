@@ -28,6 +28,15 @@
     mode: '0644'
   register: config_file        # We track if the file changed
 
+# --- deploy credentials ---
+- name: copy CCTV credentials
+  copy:
+    src: "../credentials/recorder/credentials.env"        # Make sure this file is in your Ansible project folder
+    dest: "/etc/cctv/credentials.env"
+    owner: pi
+    group: pi
+    mode: '0644'
+  register: credentials.env        # We track if the file changed
 
 
 - name: Restart CCTV recorder service

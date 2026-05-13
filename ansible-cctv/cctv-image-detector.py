@@ -16,16 +16,32 @@ from urllib.parse import quote
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 
+# ==========================================
+# COMPLETELY SILENCE FLASK ACCESS LOGS
+# ==========================================
+import logging
+
+# Disable all Werkzeug/Flask logging
+werkzeug_log = logging.getLogger('werkzeug')
+werkzeug_log.disabled = True
+
+# Or alternatively, set to critical (only shows fatal errors)
+logging.getLogger('werkzeug').setLevel(logging.CRITICAL)
+
+# Also silence requests library logs
+logging.getLogger('requests').setLevel(logging.WARNING)
+logging.getLogger('urllib3').setLevel(logging.WARNING)
+
 VERSION = "3.17.1"
 
 # Suppress FFmpeg warnings
-os.environ['OPENCV_LOG_LEVEL'] = 'OFF'
-os.environ['FFMPEG_LOG_LEVEL'] = 'panic'
+#os.environ['OPENCV_LOG_LEVEL'] = 'OFF'
+#os.environ['FFMPEG_LOG_LEVEL'] = 'panic'
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
-ANALYSIS_INTERVAL = 2
+ANALYSIS_INTERVAL = 2.5
 MAX_IMAGES = 6
 COOLDOWN = 4.0
 CAM_THREAD_SLEEP = 0.01
@@ -71,9 +87,10 @@ last_run = {n: 0 for n in NODES}
 # ==========================================
 app = Flask(__name__)
 
+"""
 @app.route('/session-reset', methods=['POST'])
 def session_reset():
-    """Called by RPi recorder when a session is complete"""
+# Called by RPi recorder when a session is complete
     try:
         data = request.get_json()
         camera_name = data.get('camera')
@@ -88,6 +105,34 @@ def session_reset():
     except Exception as e:
         print(f"Error: {e}")
         return jsonify({"status": "error"}), 500
+"""
+# To see only relevant resets
+@app.route('/session-reset', methods=['POST'])
+def session_reset():
+    """Called by RPi recorder when a session is complete"""
+    try:
+        data = request.get_json()
+        camera_name = data.get('camera')
+        
+        if camera_name and camera_name in session_waiting_reset:
+            if session_waiting_reset[camera_name]:  # Only log if actually waiting
+                session_waiting_reset[camera_name] = False
+                session_count[camera_name] = 0
+                print(f"[{time.strftime('%H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - DETECTION RESUMED")
+                return '', 200  # Return empty response, no logging
+
+            else:
+                # Silent ignore - camera wasn't waiting
+                # pass
+                return '', 200  # Return empty response, no logging
+            #return jsonify({"status": "ok"}), 200
+        
+        # Silently ignore resets for cameras not waiting
+        return jsonify({"status": "ok"}), 200
+    except Exception as e:
+        print(f"Error: {e}")
+        return jsonify({"status": "error"}), 500
+
 
 def start_webhook_server():
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=WEBHOOK_PORT, debug=False, use_reloader=False), daemon=True).start()
@@ -107,8 +152,8 @@ def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_
         cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
     
     timestamp = time.strftime('%H:%M:%S')
-    cv2.putText(frame, timestamp, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-    cv2.putText(frame, f"Frame {current_count}/{max_images}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+   # cv2.putText(frame, timestamp, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+   # cv2.putText(frame, f"Frame {current_count}/{max_images}", (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
     
     try:
         success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
@@ -192,7 +237,10 @@ if __name__ == "__main__":
     
     print("=" * 60)
     print(f"CCTV DETECTOR v{VERSION} - NON-BLOCKING SESSIONS")
+    print(f"ANALYSIS_INTERVAL: {ANALYSIS_INTERVAL} seconds.")
+    print(f"YOLO_CONFIDENCE: {YOLO_CONFIDENCE} per camera")
     print(f"MAX_IMAGES: {MAX_IMAGES} per camera")
+    print(f"WEBHOOK_PORT : {WEBHOOK_PORT} ")
     print("=" * 60)
     
     # Result handler thread
