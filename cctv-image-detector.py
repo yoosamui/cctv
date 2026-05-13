@@ -16,9 +16,10 @@
 #   5. Recorder signals back via HTTP POST -> reset session
 #
 # ARCHITECTURE:
-#   [6 Cameras] -> [Detector Laptop] -> [6 RPis] -> [Save Images]
+#   [6 Cameras] -> [Detector RPI 5] -> [6 RPis 4B] -> [Save Images]
 #                      ↑                      │
 #                      └─── Reset Signal ─────┘
+#                      └───> send images ─────┘
 #
 # SETTINGS (Adjust these based on your needs):
 #   ANALYSIS_INTERVAL = 2.5   Seconds between camera checks (1-5)
@@ -92,7 +93,7 @@ VERSION = "3.21.0"
 # The watchdog messages are NOT errors - they're information!
 #
 # ==========================================
-ANALYSIS_INTERVAL = 3        # How often to check cameras (seconds)
+ANALYSIS_INTERVAL = 5        # How often to check cameras (seconds)
 MAX_IMAGES = 6               # Maximum images per detection event
 COOLDOWN = 4.0               # Seconds between frames in a session
 CAM_THREAD_SLEEP = 0.01      # Camera capture rate (seconds)
@@ -104,7 +105,7 @@ WEBHOOK_PORT = 5001          # Port for receiving reset signals
 			     # This will prevent the watchdog from resetting sessions that are legitimately waiting for the recorder's 5-minute segment to complete.
 SESSION_TIMEOUT = 600        # Seconds of inactivity before session timeout. 5 minutes - enough time for multiple detection waves
 
-WATCHDOG_TIMEOUT = 600       # 10 minutes timeout for stuck waiting sessions
+WATCHDOG_TIMEOUT = 600       # 20 minutes timeout for stuck waiting sessions
 WATCHDOG_CHECK = 10          # Check watchdog every 10 seconds
 POST_RESET_COOLDOWN = 3      # Seconds to wait after reset before allowing new detections
 
