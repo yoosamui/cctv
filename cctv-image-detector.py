@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.18.1
+# CCTV IMAGE DETECTOR - VERSION 3.21.0
 # ==============================================================================
 #
 # WHAT THIS DOES:
@@ -16,9 +16,10 @@
 #   5. Recorder signals back via HTTP POST -> reset session
 #
 # ARCHITECTURE:
-#   [6 Cameras] -> [Detector Laptop] -> [6 RPis] -> [Save Images]
+#   [6 Cameras] -> [Detector RPI 5] -> [6 RPis 4B] -> [Save Images]
 #                      ↑                      │
 #                      └─── Reset Signal ─────┘
+#                      └───> send images ─────┘
 #
 # SETTINGS (Adjust these based on your needs):
 #   ANALYSIS_INTERVAL = 2.5   Seconds between camera checks (1-5)
@@ -46,59 +47,12 @@ import time
 import requests
 import os
 import sys
+import uuid
 from ultralytics import YOLO
 from queue import Empty
 from urllib.parse import quote
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
-
-#!/usr/bin/env python3
-# ==========================================
-# LOGGING SETUP - FIXED PERMISSIONS
-# ==========================================
-
-# Use home directory instead of /var/log (no permission issues)
-LOG_FILE = os.path.expanduser("~/cctv/cctv_detector.log")  # Saves to /home/ops/cctv/cctv_detector.log
-# OR use current directory:
-# LOG_FILE = "detector.log"
-
-# Create log directory if needed (for home directory, usually not needed)
-log_dir = os.path.dirname(LOG_FILE)
-if log_dir and not os.path.exists(log_dir):
-    os.makedirs(log_dir, exist_ok=True)
-
-class TeeLogger:
-    """Write to both console and file"""
-    def __init__(self, filename):
-        self.terminal = sys.stdout
-        try:
-            self.log = open(filename, 'a')
-        except Exception as e:
-            print(f"Warning: Cannot open log file {filename}: {e}")
-            self.log = None
-    
-    def write(self, message):
-        self.terminal.write(message)
-        if self.log:
-            self.log.write(message)
-            self.log.flush()
-    
-    def flush(self):
-        self.terminal.flush()
-        if self.log:
-            self.log.flush()
-
-# Only setup file logging if we can write to the file
-try:
-    sys.stdout = TeeLogger(LOG_FILE)
-    sys.stderr = sys.stdout
-    print(f"✅ Logging to: {LOG_FILE}")
-except Exception as e:
-    print(f"⚠️ File logging disabled: {e}")
-
-# The rest of your script continues here...
-
-
 
 # ==========================================
 # COMPLETELY SILENCE FLASK ACCESS LOGS
@@ -116,11 +70,7 @@ logging.getLogger('werkzeug').setLevel(logging.CRITICAL)
 logging.getLogger('requests').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 
-VERSION = "3.18.1"
-
-
-
-
+VERSION = "3.21.0"
 
 # Suppress FFmpeg warnings
 #os.environ['OPENCV_LOG_LEVEL'] = 'OFF'
@@ -128,8 +78,22 @@ VERSION = "3.18.1"
 
 # ==========================================
 # CONFIGURATION
+#
+# SESSION_TIMEOUT = 600 # important
+# You were moving, so each camera only saw you for a moment - just long enough for 1 frame before you walked out of frame.
+# This is NORMAL and EXPECTED behavior!
+#
+# The system is working correctly:
+#
+# -  You walk past a camera → YOLO detects you
+# -  Session starts (1/6 frames)
+# -  You leave the frame → No more detections
+# -  Watchdog waits 5 minutes, then cleans up the incomplete session
+#
+# The watchdog messages are NOT errors - they're information!
+#
 # ==========================================
-ANALYSIS_INTERVAL = 6        # How often to check cameras (seconds)
+ANALYSIS_INTERVAL = 5        # How often to check cameras (seconds)
 MAX_IMAGES = 6               # Maximum images per detection event
 COOLDOWN = 4.0               # Seconds between frames in a session
 CAM_THREAD_SLEEP = 0.01      # Camera capture rate (seconds)
@@ -137,8 +101,14 @@ YOLO_CONFIDENCE = 0.40       # Detection confidence threshold
 YOLO_INPUT_SIZE = 320        # Image size for YOLO (pixels)
 JPEG_QUALITY = 80            # Image quality (0-100)
 WEBHOOK_PORT = 5001          # Port for receiving reset signals
-SESSION_TIMEOUT = 30         # Seconds to wait for recorder reset before forcing reset
-WATCHDOG_TIMEOUT = 240
+
+			     # This will prevent the watchdog from resetting sessions that are legitimately waiting for the recorder's 5-minute segment to complete.
+SESSION_TIMEOUT = 600        # Seconds of inactivity before session timeout. 5 minutes - enough time for multiple detection waves
+
+WATCHDOG_TIMEOUT = 600       # 20 minutes timeout for stuck waiting sessions
+WATCHDOG_CHECK = 10          # Check watchdog every 10 seconds
+POST_RESET_COOLDOWN = 3      # Seconds to wait after reset before allowing new detections
+
 # ==========================================
 # AUTHENTICATION
 # ==========================================
@@ -171,9 +141,12 @@ NODES = {
 # ==========================================
 session_waiting_reset = {n: False for n in NODES}  # Camera is waiting for recorder reset
 session_count = {n: 0 for n in NODES}
+session_detection_id = {n: None for n in NODES}  # Unique ID for each detection session
 last_upload = {n: 0 for n in NODES}
 last_run = {n: 0 for n in NODES}
 last_activity = {n: 0 for n in NODES}  # Track last detection activity
+last_waiting_start = {n: 0 for n in NODES}  # Track when waiting state began
+last_reset_time = {n: 0 for n in NODES}  # Track when reset was last received
 
 # ==========================================
 # FLASK WEBHOOK SERVER WITH AUTH
@@ -190,22 +163,9 @@ def verify_auth():
 @app.route('/session-reset', methods=['POST'])
 def session_reset():
     """Called by RPi recorder when a session is complete"""
-    try:
-        data = request.get_json()
-        camera_name = data.get('camera')
-
-        if not data:
-            return jsonify({"status": "error", "error": "No JSON data"}), 400
-
-
-    except Exception as e:
-        print(f"Error in session_reset: {e}")
-        return jsonify({"status": "error", "error": str(e)}), 500
-
-
     # Verify authentication
     if not verify_auth():
-        print(f"[{time.strftime('%H:%M:%S')}] ⚠️ Unauthorized reset attempt from {camera_name}: {request.remote_addr}")
+        print(f"[{time.strftime('%H:%M:%S')}] ⚠️ Unauthorized reset attempt from {request.remote_addr}")
         return jsonify({"status": "unauthorized", "error": "Invalid API key"}), 401
     
     try:
@@ -213,13 +173,16 @@ def session_reset():
         if not data:
             return jsonify({"status": "error", "error": "No JSON data"}), 400
             
-#        camera_name = data.get('camera')
+        camera_name = data.get('camera')
         
         if camera_name and camera_name in session_waiting_reset:
             if session_waiting_reset[camera_name]:  # Only log if actually waiting
                 session_waiting_reset[camera_name] = False
                 session_count[camera_name] = 0
-                print(f"[{time.strftime('%H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - DETECTION RESUMED")
+                session_detection_id[camera_name] = None  # Clear detection ID
+                last_waiting_start[camera_name] = 0  # Reset waiting start time
+                last_reset_time[camera_name] = time.time()  # Track reset time for cooldown
+                print(f"[{time.strftime('%H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - DETECTION RESUMED (cooldown: {POST_RESET_COOLDOWN}s)")
                 return '', 200
             else:
                 # Silent ignore - camera wasn't waiting
@@ -241,8 +204,11 @@ def health_check():
             name: {
                 "waiting": session_waiting_reset[name],
                 "count": session_count[name],
+                "detection_id": session_detection_id[name],
                 "last_activity": last_activity[name],
-                "last_upload": last_upload[name]
+                "last_upload": last_upload[name],
+                "waiting_seconds": int(time.time() - last_waiting_start[name]) if session_waiting_reset[name] else 0,
+                "cooldown_remaining": max(0, POST_RESET_COOLDOWN - int(time.time() - last_reset_time[name])) if last_reset_time[name] > 0 else 0
             } for name in NODES
         }
     }), 200
@@ -255,7 +221,8 @@ def start_webhook_server():
 # ==========================================
 # UPLOAD FUNCTION
 # ==========================================
-def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_images):
+def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_images, detection_id):
+    """Draw bounding boxes and upload frame to recorder"""
     yellow = (0, 255, 255)
     for d in detections:
         x1, y1, x2, y2 = d["box"]
@@ -269,13 +236,20 @@ def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_
         success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         if success:
             files = {'image': (f"{camera_name}_{ts}.jpg", buffer.tobytes(), 'image/jpeg')}
-            data = {'frame_num': current_count, 'total_frames': max_images, 'camera': camera_name}
+            data = {
+                'frame_num': current_count,
+                'total_frames': max_images,
+                'camera': camera_name,
+                'detection_id': detection_id
+            }
             response = requests.post(url, files=files, data=data, timeout=5)
             response.raise_for_status()
             
             if current_count == max_images:
                 print(f"[{ts}] 🛑 {camera_name}: Last frame sent ({current_count}/{max_images}) - waiting for recorder reset...")
                 session_waiting_reset[camera_name] = True
+                last_waiting_start[camera_name] = time.time()  # Track when waiting started
+                # Keep detection_id for debugging, will be cleared on reset
                 
     except Exception as e:
         print(f"[{ts}] ✗ {camera_name}: Upload failed - {e}")
@@ -284,6 +258,7 @@ def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_
 # YOLO WORKER
 # ==========================================
 def yolo_worker(input_q, output_q):
+    """Worker process for YOLO inference"""
     model = YOLO("yolov8n.pt")
     while True:
         try:
@@ -300,6 +275,8 @@ def yolo_worker(input_q, output_q):
 # CAMERA STREAM WITH RECONNECT LOGIC
 # ==========================================
 class CameraStream:
+    """Thread-safe camera stream handler with auto-reconnect"""
+    
     def __init__(self, name, url):
         self.name = name
         self.url = url
@@ -353,18 +330,28 @@ class CameraStream:
 # ==========================================
 def session_watchdog():
     """
-    Periodically checks for stuck waiting sessions.
+    Periodically checks for stuck waiting sessions and idle sessions.
     Runs independently of frame processing.
     """
     while True:
-        time.sleep(5)  # Check every 5 seconds
+        time.sleep(WATCHDOG_CHECK)  # Check every WATCHDOG_CHECK seconds
         now = time.time()
         for name in NODES:
-            # If waiting for reset AND no recent activity for > WATCHDOG_TIMEOUT seconds
-            if session_waiting_reset[name] and (now - last_run[name] > WATCHDOG_TIMEOUT):
-                print(f"[{time.strftime('%H:%M:%S')}] ⚠️ Watchdog: {name} stuck waiting (last_run: {now - last_run[name]:.0f}s ago). Force resetting.")
-                session_waiting_reset[name] = False
-                session_count[name] = 0
+            # Check for stuck waiting sessions (recorder never responded)
+            if session_waiting_reset[name] and last_waiting_start[name] > 0:
+                if (now - last_waiting_start[name]) > WATCHDOG_TIMEOUT:
+                    print(f"[{time.strftime('%H:%M:%S')}] ⚠️ Watchdog: {name} stuck waiting for {now - last_waiting_start[name]:.0f}s (timeout: {WATCHDOG_TIMEOUT}s). Force resetting.")
+                    session_waiting_reset[name] = False
+                    session_count[name] = 0
+                    session_detection_id[name] = None
+                    last_waiting_start[name] = 0
+            
+            # Check for idle sessions (has count but no activity)
+            elif not session_waiting_reset[name] and session_count[name] > 0:
+                if (now - last_activity[name]) > SESSION_TIMEOUT:
+                    print(f"[{time.strftime('%H:%M:%S')}] ⏰ Session timeout: {name} - no activity for {now - last_activity[name]:.0f}s (timeout: {SESSION_TIMEOUT}s). Resetting.")
+                    session_count[name] = 0
+                    session_detection_id[name] = None
 
 # ==========================================
 # MAIN
@@ -380,13 +367,14 @@ if __name__ == "__main__":
     time.sleep(2)
     
     print("=" * 60)
-    print(f"CCTV DETECTOR v{VERSION} - WITH WATCHDOG TIMEOUT")
-    print(f"ANALYSIS_INTERVAL: {ANALYSIS_INTERVAL} seconds.")
+    print(f"CCTV DETECTOR v{VERSION} - WITH DETECTION ID SESSION TRACKING")
+    print(f"ANALYSIS_INTERVAL: {ANALYSIS_INTERVAL}s.")
     print(f"YOLO_CONFIDENCE: {YOLO_CONFIDENCE}")
     print(f"MAX_IMAGES: {MAX_IMAGES} per camera")
     print(f"WEBHOOK_PORT: {WEBHOOK_PORT}")
-    print(f"SESSION_TIMEOUT: {SESSION_TIMEOUT} seconds")
-    print(f"WATCHDOG: 5s check interval, {WATCHDOG_TIMEOUT}s  timeout")
+    print(f"SESSION_TIMEOUT: {SESSION_TIMEOUT}s (idle sessions)")
+    print(f"WATCHDOG: {WATCHDOG_CHECK}s check interval, {WATCHDOG_TIMEOUT}s timeout for stuck sessions")
+    print(f"POST_RESET_COOLDOWN: {POST_RESET_COOLDOWN}s (cooldown after reset)")
     print("=" * 60)
     
     # Start watchdog thread
@@ -399,11 +387,26 @@ if __name__ == "__main__":
                 name, frame, detections, ts = result_q.get(timeout=0.01)
                 now = time.time()
                 
+                # ALWAYS update last_run when we get a result
+                last_run[name] = now
+                
                 if detections:
+                    # Check if we're in post-reset cooldown
+                    cooldown_remaining = POST_RESET_COOLDOWN - (now - last_reset_time[name]) if last_reset_time[name] > 0 else 0
+                    
+                    if cooldown_remaining > 0:
+                        # Skip processing during cooldown
+                        continue
+                    
                     # Only process if not waiting for reset
                     if not session_waiting_reset[name] and session_count[name] < MAX_IMAGES:
                         if session_count[name] == 0 and (now - last_upload[name] < COOLDOWN):
                             continue
+                        
+                        # Generate new detection_id for first frame of session
+                        if session_count[name] == 0:
+                            session_detection_id[name] = str(uuid.uuid4())[:8]  # Short unique ID
+                            print(f"[{ts}] 🆔 {name}: New detection session {session_detection_id[name]}")
                         
                         session_count[name] += 1
                         last_activity[name] = now  # Update activity timestamp
@@ -414,14 +417,11 @@ if __name__ == "__main__":
                             threading.Thread(
                                 target=draw_and_upload,
                                 args=(name, NODES[name]["rpi_url"], full_frame, detections, ts,
-                                      session_count[name], MAX_IMAGES),
+                                      session_count[name], MAX_IMAGES, session_detection_id[name]),
                                 daemon=True
                             ).start()
                         last_upload[name] = now
-                else:
-                    # Update last_run for watchdog even on no-detections
-                    if session_count[name] > 0:
-                        last_run[name] = now
+                # No else block needed - last_run is always updated above
                         
             except Empty:
                 continue
