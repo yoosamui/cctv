@@ -1,7 +1,7 @@
 """
 CCTV Recorder with Person Detection
 ====================================
-Version: 1.7.1 - Integrated AI Analysis Trigger
+Version: 1.7.2 - Fixed Webhook Integration
 """
 
 import subprocess
@@ -11,7 +11,7 @@ import shutil
 import logging
 import argparse
 import configparser
-import requests  # Added for AI Trigger
+import requests
 from datetime import datetime
 from flask import Flask, request
 from threading import Thread, Lock
@@ -21,8 +21,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-
-VERSION = "1.7.1"
+VERSION = "1.7.2"
 
 # ================= CONFIGURATION LOADING =================
 config = configparser.ConfigParser()
@@ -42,20 +41,28 @@ BASE_DIR = config.get('STORAGE', 'base_dir', fallback='/media/share/cameras/cctv
 TEMP_DIR = config.get('STORAGE', 'temp_dir', fallback='/tmp/cctv_staging')
 RETENTION_DAYS = config.getint('STORAGE', 'retention_days', fallback=7)
 SEGMENT_DURATION = config.getint('RECORDING', 'segment_duration', fallback=300)
-MAX_IMAGES_PER_SESSION = config.getint('RECORDING', 'max_images_per_session', fallback=3)
+MAX_IMAGES_PER_SESSION = config.getint('RECORDING', 'max_images_per_session', fallback=6)  # Match detector
 FLASK_PORT = config.getint('NETWORK', 'flask_port', fallback=5000)
-# AI Laptop Address
-AI_ANALYZER_URL = "http://192.168.1.103:8080/analyze"
-# ==========================================
-# AUTHENTICATION
-# ==========================================
-load_dotenv("/etc/cctv/credentials.env")
-WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
-if not WEBHOOK_SECRET:
-    print("ERROR: WEBHOOK_SECRET not found!")
-    sys.exit(1)
 
-#WEBHOOK_SECRET ="de31aba50e7d4d2baafa405fb15e1304b01c67e6d783db3b6aeb48bbc7a2c245"
+# ==========================================
+# AUTHENTICATION - Fixed
+# ==========================================
+credentials_file = "/etc/cctv/credentials.env"
+if os.path.exists(credentials_file):
+    load_dotenv(credentials_file)
+    WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+    if not WEBHOOK_SECRET:
+        print(f"WARNING: WEBHOOK_SECRET not found in {credentials_file}")
+        print("Authentication to detector will fail!")
+        WEBHOOK_SECRET = "default-insecure-secret"  # Fallback for testing
+else:
+    print(f"ERROR: Credentials file not found: {credentials_file}")
+    print("Please run Ansible playbook to deploy credentials")
+    WEBHOOK_SECRET = None
+
+# Detector webhook URL
+DETECTOR_WEBHOOK_URL = "http://192.168.1.103:5001/session-reset"
+
 # ================= GLOBAL STATE =================
 CAM_NAME = None
 URL = None
@@ -68,7 +75,9 @@ shutdown_lock = Lock()
 move_executor = ThreadPoolExecutor(max_workers=4)
 video_start_time_secs = datetime.now().timestamp()
 
+# Create necessary directories
 os.makedirs(TEMP_DIR, exist_ok=True)
+
 app = Flask(__name__)
 
 # Silence Flask logs
@@ -83,77 +92,55 @@ def get_camera_dir():
     return camera_path
 
 # ================= AI ANALYZER TRIGGER =================
-"""
 def send_to_analyzer(file_path):
-    import requests
-    import os
-
-    # Get camera name from environment variable or use hardcoded value
-    camera_name = CAM_NAME #os.getenv('CAMERA_NAME', CAM_NAME)  # CAM_NAME should be defined at top of file
-    
-    # CORRECT POST FORMAT
-    url = "http://192.168.1.103:5001/session-reset"  # Your laptop IP
-    headers = {'Content-Type': 'application/json'}
-    payload = {"camera": camera_name}
-    
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=2)
-        print(f"POST response: {response.status_code} - {response.text}")
-
-        if response.status_code == 200:
-            print(f"✅ {camera_name} session reset confirmed")
-            return True
-        else:
-            print(f"❌ Failed: {response.status_code}")
-            return False
-
-    except Exception as e:
-        print(f"Error: {e}")
+    """Send reset signal to detector when recording is complete"""
+    if not WEBHOOK_SECRET:
+        print(f"❌ Cannot send reset: No WEBHOOK_SECRET configured")
         return False
-
-"""
-
-def send_to_analyzer(file_path):
-    import requests
-    import os
-
-    # Get camera name from environment variable or use hardcoded value
-    camera_name = CAM_NAME  # CAM_NAME should be defined at top of file
     
-    # Your laptop IP
-    url = "http://192.168.1.103:5001/session-reset"
-    
-    # IMPORTANT: This must match the WEBHOOK_SECRET in your detector's .env file
-#    WEBHOOK_SECRET = "de31aba50e7d4d2baafa405fb15e1304b01c67e6d783db3b6aeb48bbc7a2c245"
-#os.getenv('WEBHOOK_SECRET', 'your-strong-random-secret-here')
-    
+    camera_name = CAM_NAME
     headers = {
         'Content-Type': 'application/json',
-        'X-API-KEY': WEBHOOK_SECRET  # Add authentication header
+        'X-API-KEY': WEBHOOK_SECRET
     }
     payload = {"camera": camera_name}
     
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=2)
-        print(f"POST response: {response.status_code}")
-        
-        if response.status_code == 200:
-            print(f"✅ {camera_name} session reset confirmed")
-            return True
-        elif response.status_code == 401:
-            print(f"❌ Authentication failed - Check WEBHOOK_SECRET matches detector")
-            return False
-        else:
-            print(f"❌ Failed: {response.status_code} - {response.text}")
-            return False
-
-    except requests.exceptions.Timeout:
-        print(f"⚠️ Timeout connecting to analyzer at {url}")
-        return False
-    except Exception as e:
-        print(f"Error: {e}")
-        return False
-
+    # Retry logic
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                DETECTOR_WEBHOOK_URL, 
+                json=payload, 
+                headers=headers, 
+                timeout=3
+            )
+            
+            if response.status_code == 200:
+                print(f"✅ {camera_name} session reset confirmed")
+                return True
+            elif response.status_code == 401:
+                print(f"❌ AUTH ERROR: API key mismatch for {camera_name}")
+                print(f"   Detector expects different WEBHOOK_SECRET")
+                return False
+            else:
+                print(f"⚠️ Attempt {attempt+1}/{max_retries}: HTTP {response.status_code}")
+                
+        except requests.exceptions.ConnectionError:
+            print(f"⚠️ Attempt {attempt+1}/{max_retries}: Cannot connect to detector at {DETECTOR_WEBHOOK_URL}")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+        except requests.exceptions.Timeout:
+            print(f"⚠️ Attempt {attempt+1}/{max_retries}: Timeout connecting to detector")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+        except Exception as e:
+            print(f"Error: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+    
+    print(f"❌ Failed to send reset after {max_retries} attempts")
+    return False
 
 @app.route("/upload", methods=["POST"])
 def upload_image():
@@ -171,12 +158,8 @@ def upload_image():
             session_image_count = 0
 
         if session_image_count >= MAX_IMAGES_PER_SESSION:
-            now = datetime.now().timestamp()
-            duration_secs = abs(int(0 - (now - video_start_time_secs)))
-            if duration_secs > 300:
-                duration_secs = 200
             return {
-                "status": "error","duration_secs": duration_secs,
+                "status": "error",
                 "message": f"Limit reached ({MAX_IMAGES_PER_SESSION})."
             }, 429 
         
@@ -199,10 +182,22 @@ def upload_image():
 
     return {"status": "error", "message": "No image part"}, 400
 
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "running",
+        "camera": CAM_NAME,
+        "version": VERSION,
+        "session_count": session_image_count,
+        "max_images": MAX_IMAGES_PER_SESSION
+    }, 200
+
 def run_flask():
     app.run(host="0.0.0.0", port=FLASK_PORT, debug=False, use_reloader=False, threaded=True)
 
 def move_to_share_background(local_path, filename):
+    """Move file to final location and trigger detector reset"""
     try:
         final_dir = get_camera_dir()
         final_path = os.path.join(final_dir, filename)
@@ -210,7 +205,7 @@ def move_to_share_background(local_path, filename):
             shutil.move(local_path, final_path)
             print(f"[{datetime.now().strftime('%H:%M:%S')}] File moved to share: {filename}", flush=True)
             
-            # TRIGGER AI ANALYSIS NOW
+            # Send reset signal to detector
             send_to_analyzer(final_path)
             
     except Exception as e:
@@ -222,7 +217,6 @@ def kill_ffmpeg():
 
 def recording_loop():
     global current_video_prefix, shutdown_flag, video_start_time_secs
-    last_cleanup_segment = -1
     
     while not shutdown_flag:
         kill_ffmpeg()
@@ -250,7 +244,6 @@ def recording_loop():
             subprocess.run(cmd, check=True, timeout=SEGMENT_DURATION + 30)
             
             if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-                # Passing filename to move and then trigger analysis
                 move_executor.submit(move_to_share_background, local_path, filename)
         except Exception as e:
             print(f"RECORDING ERROR: {e}", flush=True)
@@ -258,6 +251,7 @@ def recording_loop():
 
 def signal_handler(signum, frame):
     global shutdown_flag
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Shutting down recorder...")
     shutdown_flag = True
     kill_ffmpeg()
     move_executor.shutdown(wait=False)
@@ -265,10 +259,14 @@ def signal_handler(signum, frame):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--name', '-n', type=str, required=True)
-    parser.add_argument('--url', '-u', type=str, required=True)
+    parser.add_argument('--name', '-n', type=str, required=True, help='Camera name (e.g., Gate, Center)')
+    parser.add_argument('--url', '-u', type=str, required=True, help='RTSP URL of the camera')
     args = parser.parse_args()
     CAM_NAME, URL = args.name, args.url
+    
+    print(f"Starting recorder for: {CAM_NAME}")
+    print(f"Detector webhook: {DETECTOR_WEBHOOK_URL}")
+    print(f"Flask port: {FLASK_PORT}")
     
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)

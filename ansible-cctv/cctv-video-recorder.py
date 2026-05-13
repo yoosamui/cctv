@@ -1,7 +1,7 @@
 """
 CCTV Recorder with Person Detection
 ====================================
-Version: 1.7.1 - Integrated AI Analysis Trigger
+Version: 1.8.0 - Detection ID Support for Session Management
 """
 
 import subprocess
@@ -11,7 +11,7 @@ import shutil
 import logging
 import argparse
 import configparser
-import requests  # Added for AI Trigger
+import requests
 from datetime import datetime
 from flask import Flask, request
 from threading import Thread, Lock
@@ -19,8 +19,9 @@ import signal
 import sys
 import re
 from concurrent.futures import ThreadPoolExecutor
+from dotenv import load_dotenv
 
-VERSION = "1.7.1"
+VERSION = "1.8.0"
 
 # ================= CONFIGURATION LOADING =================
 config = configparser.ConfigParser()
@@ -40,16 +41,34 @@ BASE_DIR = config.get('STORAGE', 'base_dir', fallback='/media/share/cameras/cctv
 TEMP_DIR = config.get('STORAGE', 'temp_dir', fallback='/tmp/cctv_staging')
 RETENTION_DAYS = config.getint('STORAGE', 'retention_days', fallback=7)
 SEGMENT_DURATION = config.getint('RECORDING', 'segment_duration', fallback=300)
-MAX_IMAGES_PER_SESSION = config.getint('RECORDING', 'max_images_per_session', fallback=3)
+MAX_IMAGES_PER_SESSION = config.getint('RECORDING', 'max_images_per_session', fallback=6)
 FLASK_PORT = config.getint('NETWORK', 'flask_port', fallback=5000)
-# AI Laptop Address
-AI_ANALYZER_URL = "http://192.168.1.103:8080/analyze"
+
+# ==========================================
+# AUTHENTICATION
+# ==========================================
+credentials_file = "/etc/cctv/credentials.env"
+if os.path.exists(credentials_file):
+    load_dotenv(credentials_file)
+    WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
+    if not WEBHOOK_SECRET:
+        print(f"WARNING: WEBHOOK_SECRET not found in {credentials_file}")
+        print("Authentication to detector will fail!")
+        WEBHOOK_SECRET = None
+else:
+    print(f"WARNING: Credentials file not found: {credentials_file}")
+    print("Please run Ansible playbook to deploy credentials")
+    WEBHOOK_SECRET = None
+
+# Detector webhook URL
+DETECTOR_WEBHOOK_URL = "http://192.168.1.103:5001/session-reset"
 
 # ================= GLOBAL STATE =================
 CAM_NAME = None
 URL = None
 session_image_count = 0
 last_session_prefix = ""
+last_detection_id = None  # Track unique detection session ID
 current_video_prefix = ""
 prefix_lock = Lock()
 shutdown_flag = False
@@ -57,7 +76,9 @@ shutdown_lock = Lock()
 move_executor = ThreadPoolExecutor(max_workers=4)
 video_start_time_secs = datetime.now().timestamp()
 
+# Create necessary directories
 os.makedirs(TEMP_DIR, exist_ok=True)
+
 app = Flask(__name__)
 
 # Silence Flask logs
@@ -71,114 +92,178 @@ def get_camera_dir():
     os.makedirs(camera_path, mode=0o755, exist_ok=True)
     return camera_path
 
-# On the RPi recorder - CORRECT FORMAT
+# ================= AI ANALYZER TRIGGER =================
 def send_to_analyzer(file_path):
-    import requests
-
+    """Send reset signal to detector when recording is complete"""
+    if not WEBHOOK_SECRET:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Cannot send reset: No WEBHOOK_SECRET configured")
+        return False
+    
     camera_name = CAM_NAME
-
-    # Extract camera name
-#    camera_name = None
-#    for cam in ["Gate", "Center", "Entrance", "Garage", "Behind", "Left"]:
-#        if cam in file_path:
-#            camera_name = cam
-#            break
+    headers = {
+        'Content-Type': 'application/json',
+        'X-API-KEY': WEBHOOK_SECRET
+    }
+    payload = {"camera": camera_name}
     
-    if not camera_name:
-        print(f"Could not determine camera name")
-        return False
-    
-    # CORRECT POST FORMAT
-    url = "http://192.168.1.103:5001/session-reset"  # Your laptop IP
-    headers = {'Content-Type': 'application/json'}
-    payload = {"camera": camera_name}  # Must be JSON with "camera" field
-    
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=2)
-        print(f"POST response: {response.status_code} - {response.text}")
-        
-        if response.status_code == 200:
-            print(f"[*] {CAM_NAME} session reset confirmed")
-            return True
-        else:
-            print(f"❌ Failed: {response.status_code}")
-            return False
+    # Retry logic
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.post(
+                DETECTOR_WEBHOOK_URL, 
+                json=payload, 
+                headers=headers, 
+                timeout=3
+            )
             
-    except Exception as e:
-        print(f"Error: {e}")
-        return False
+            if response.status_code == 200:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ {camera_name} session reset confirmed")
+                return True
+            elif response.status_code == 401:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ AUTH ERROR: API key mismatch for {camera_name}")
+                return False
+            else:
+                print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Attempt {attempt+1}/{max_retries}: HTTP {response.status_code}")
+                
+        except requests.exceptions.ConnectionError:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Attempt {attempt+1}/{max_retries}: Cannot connect to detector")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+        except requests.exceptions.Timeout:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Attempt {attempt+1}/{max_retries}: Timeout connecting to detector")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+        except Exception as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Error: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(2)
+    
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Failed to send reset after {max_retries} attempts")
+    return False
 
-
-
-
+# ================= FLASK ENDPOINTS =================
 @app.route("/upload", methods=["POST"])
 def upload_image():
-    """Receives detection images and enforces per-session limits."""
-    global session_image_count, last_session_prefix
+    """Receives detection images with detection_id for session tracking."""
+    global session_image_count, last_session_prefix, last_detection_id
+    
+    # Get detection session info from form data
+    detection_id = request.form.get('detection_id', None)
+    frame_num = int(request.form.get('frame_num', 0))
+    total_frames = int(request.form.get('total_frames', 6))
+    camera_name = request.form.get('camera', CAM_NAME)
     
     with prefix_lock:
         if current_video_prefix == "":
             return {"status": "error", "message": "Recording not started yet"}, 503
-            
-        current_prefix = current_video_prefix
         
-        if current_prefix != last_session_prefix:
-            last_session_prefix = current_prefix
+        # New detection session? Reset counter
+        if detection_id and detection_id != last_detection_id:
+            last_detection_id = detection_id
             session_image_count = 0
-
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🆔 New detection session: {detection_id} for {camera_name}")
+        
+        # Check if we've reached the limit for this session
         if session_image_count >= MAX_IMAGES_PER_SESSION:
-            now = datetime.now().timestamp()
-            duration_secs = abs(int(0 - (now - video_start_time_secs)))
-            if duration_secs > 300:
-                duration_secs = 200
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ REJECTED: {camera_name} - limit reached ({MAX_IMAGES_PER_SESSION})")
             return {
-                "status": "error","duration_secs": duration_secs,
-                "message": f"Limit reached ({MAX_IMAGES_PER_SESSION})."
-            }, 429 
+                "status": "error",
+                "message": f"Limit reached ({MAX_IMAGES_PER_SESSION}).",
+                "session_count": session_image_count
+            }, 429
         
+        # Increment counter for this session
         session_image_count += 1
-
-    if 'image' in request.files:
-        file = request.files['image']
-        target_dir = get_camera_dir()
-        actual_time = datetime.now().strftime("%H-%M-%S-%f")[:-3]
+        current_count = session_image_count
+    
+    # Process the image
+    if 'image' not in request.files:
+        return {"status": "error", "message": "No image part"}, 400
+    
+    file = request.files['image']
+    target_dir = get_camera_dir()
+    actual_time = datetime.now().strftime("%H-%M-%S-%f")[:-3]
+    
+    # Include detection_id in filename for easier debugging
+    detection_tag = f"_{detection_id}" if detection_id else ""
+    new_filename = f"{current_video_prefix}_DETECTION{detection_tag}_{actual_time}.jpg"
+    save_path = os.path.join(target_dir, new_filename)
+    
+    try:
+        file.save(save_path)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 📸 {camera_name}: IMAGE {current_count}/{total_frames} (ID: {detection_id})", flush=True)
         
-        new_filename = f"{current_prefix}_DETECTION_{actual_time}.jpg"
-        save_path = os.path.join(target_dir, new_filename)
+        # If this is the last frame, log completion
+        if current_count == total_frames:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ {camera_name}: Detection session {detection_id} complete ({total_frames}/{total_frames})")
         
-        try:
-            file.save(save_path)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚡IMAGE SAVED ({session_image_count}/{MAX_IMAGES_PER_SESSION})", flush=True)
-            return {"status": "success", "path": new_filename}, 200
-        except Exception as e:
-            return {"status": "error", "message": str(e)}, 500
+        return {
+            "status": "success", 
+            "path": new_filename,
+            "frame_num": current_count,
+            "total_frames": total_frames,
+            "detection_id": detection_id
+        }, 200
+    except Exception as e:
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Save failed: {e}")
+        return {"status": "error", "message": str(e)}, 500
 
-    return {"status": "error", "message": "No image part"}, 400
+@app.route("/health", methods=["GET"])
+def health_check():
+    """Health check endpoint for monitoring"""
+    with prefix_lock:
+        return {
+            "status": "running",
+            "camera": CAM_NAME,
+            "version": VERSION,
+            "session_count": session_image_count,
+            "max_images": MAX_IMAGES_PER_SESSION,
+            "current_video": current_video_prefix,
+            "last_detection_id": last_detection_id,
+            "webhook_configured": WEBHOOK_SECRET is not None
+        }, 200
+
+@app.route("/reset", methods=["POST"])
+def reset_session():
+    """Manually reset the session counter (for testing/debugging)"""
+    global session_image_count, last_detection_id
+    
+    with prefix_lock:
+        session_image_count = 0
+        last_detection_id = None
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔄 Manual reset of session counter for {CAM_NAME}")
+        return {"status": "success", "message": "Session reset"}, 200
 
 def run_flask():
+    """Start the Flask server in a background thread"""
     app.run(host="0.0.0.0", port=FLASK_PORT, debug=False, use_reloader=False, threaded=True)
 
+# ================= FILE MANAGEMENT =================
 def move_to_share_background(local_path, filename):
+    """Move file to final location and trigger detector reset"""
     try:
         final_dir = get_camera_dir()
         final_path = os.path.join(final_dir, filename)
         if os.path.exists(local_path):
             shutil.move(local_path, final_path)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] File moved to share: {filename}", flush=True)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 📁 File moved to share: {filename}", flush=True)
             
-            # TRIGGER AI ANALYSIS NOW
+            # Send reset signal to detector
             send_to_analyzer(final_path)
             
     except Exception as e:
-        print(f"BACKGROUND MOVE FAILED: {e}", flush=True)
+        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ BACKGROUND MOVE FAILED: {e}", flush=True)
 
 def kill_ffmpeg():
+    """Kill any running ffmpeg processes for this camera"""
     if CAM_NAME:
         subprocess.run(["pkill", "-9", "-f", f"ffmpeg.*{CAM_NAME}"], stderr=subprocess.DEVNULL)
 
+# ================= RECORDING LOOP =================
 def recording_loop():
+    """Main recording loop - captures video segments"""
     global current_video_prefix, shutdown_flag, video_start_time_secs
-    last_cleanup_segment = -1
     
     while not shutdown_flag:
         kill_ffmpeg()
@@ -202,34 +287,55 @@ def recording_loop():
         ]
         
         try:
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] RECORDING: {filename}", flush=True)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🎥 RECORDING: {filename}", flush=True)
             subprocess.run(cmd, check=True, timeout=SEGMENT_DURATION + 30)
             
             if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
-                # Passing filename to move and then trigger analysis
                 move_executor.submit(move_to_share_background, local_path, filename)
+        except subprocess.TimeoutExpired:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⏰ Recording timeout for {CAM_NAME}")
         except Exception as e:
-            print(f"RECORDING ERROR: {e}", flush=True)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ RECORDING ERROR: {e}", flush=True)
             time.sleep(5)
 
+# ================= SIGNAL HANDLING =================
 def signal_handler(signum, frame):
+    """Handle shutdown signals gracefully"""
     global shutdown_flag
+    print(f"\n[{datetime.now().strftime('%H:%M:%S')}] 🛑 Shutting down recorder for {CAM_NAME}...")
     shutdown_flag = True
     kill_ffmpeg()
     move_executor.shutdown(wait=False)
     sys.exit(0)
 
+# ================= MAIN =================
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--name', '-n', type=str, required=True)
-    parser.add_argument('--url', '-u', type=str, required=True)
+    parser = argparse.ArgumentParser(description='CCTV Recorder with Person Detection')
+    parser.add_argument('--name', '-n', type=str, required=True, help='Camera name (e.g., Gate, Center)')
+    parser.add_argument('--url', '-u', type=str, required=True, help='RTSP URL of the camera')
     args = parser.parse_args()
     CAM_NAME, URL = args.name, args.url
     
+    print("=" * 60)
+    print(f"CCTV RECORDER v{VERSION}")
+    print(f"Camera: {CAM_NAME}")
+    print(f"Detector URL: {DETECTOR_WEBHOOK_URL}")
+    print(f"Flask port: {FLASK_PORT}")
+    print(f"Max images per session: {MAX_IMAGES_PER_SESSION}")
+    print(f"Segment duration: {SEGMENT_DURATION}s")
+    print("=" * 60)
+    
+    # Setup signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
+    # Start Flask server in background
     server_thread = Thread(target=run_flask, daemon=True)
     server_thread.start()
     
+    # Give Flask time to start
+    time.sleep(2)
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] ✅ Recorder ready for {CAM_NAME}")
+    
+    # Start recording loop (blocks until shutdown)
     recording_loop()
