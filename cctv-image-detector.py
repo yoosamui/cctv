@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.22.1
+# CCTV IMAGE DETECTOR - VERSION 3.23.1
 # ==============================================================================
+#
+# IMPROVEMENTS in v3.23.1:
+#   1. Added 429 error handling with exponential backoff
+#   2. Increased retry delays for recorder busy states
+#   3. Better upload resilience
+#
+# IMPROVEMENTS in v3.23.0:
+#   1. Reduced WATCHDOG_TIMEOUT from 600s to 120s for faster recovery
+#   2. Increased YOLO_INPUT_SIZE from 320 to 480 for better accuracy
+#   3. Updated configuration comments for clarity
 #
 # IMPROVEMENTS in v3.22.1:
 #   1. Fixed upload queue with proper backpressure
@@ -28,19 +38,12 @@
 #                      └─── Reset Signal ─────┘
 #                      └───> send images ─────┘
 #
-# SETTINGS (Adjust these based on your needs):
-#   ANALYSIS_INTERVAL = 2.5   Seconds between camera checks (1-5)
-#   MAX_IMAGES = 6            Frames per detection event (3-10)
-#   COOLDOWN = 4.0            Seconds between frames (2-6)
-#   YOLO_CONFIDENCE = 0.40    Detection confidence (0.25 low, 0.50 high)
-#   YOLO_INPUT_SIZE = 320     Image size for AI (160 fast, 320 balanced, 640 accurate)
-#   SESSION_TIMEOUT = 30      Seconds to wait for recorder reset before forcing reset
 #
 # DEPENDENCIES:
 #   pip install ultralytics opencv-python flask requests python-dotenv
 #
 # USAGE:
-#   python3 cctv_detector.py
+#   python3 cctv_image_detector.py
 #
 # AUTHOR: yoosamui
 # DATE: 2026-05-13
@@ -72,7 +75,7 @@ logging.getLogger('werkzeug').setLevel(logging.CRITICAL)
 logging.getLogger('requests').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 
-VERSION = "3.22.1"
+VERSION = "3.23.1"
 
 # ==========================================
 # CONFIGURATION
@@ -81,12 +84,13 @@ ANALYSIS_INTERVAL = 5
 MAX_IMAGES = 6
 COOLDOWN = 4.0
 CAM_THREAD_SLEEP = 0.01
-YOLO_CONFIDENCE = 0.40
-YOLO_INPUT_SIZE = 320
+YOLO_CONFIDENCE = 0.55
+YOLO_INPUT_SIZE = 480  # What YOLO sees (for detection speed/accuracy)
+YOLO_IOU = 0.45        #  IoU threshold for NMS.  only helps with:  Duplicate boxes around the same object, Overlapping detections.
 JPEG_QUALITY = 80
 WEBHOOK_PORT = 5001
 SESSION_TIMEOUT = 600
-WATCHDOG_TIMEOUT = 600
+WATCHDOG_TIMEOUT = 120  # Changed from 600 to 120 seconds for faster recovery
 WATCHDOG_CHECK = 10
 POST_RESET_COOLDOWN = 3
 RESET_DEDUP_WINDOW = 2
@@ -95,6 +99,10 @@ RESET_DEDUP_WINDOW = 2
 UPLOAD_WORKERS = 4
 UPLOAD_QUEUE_SIZE = 20
 YOLO_RESTART_DELAY = 5
+
+# Upload retry settings
+UPLOAD_MAX_RETRIES = 3
+UPLOAD_RETRY_DELAY_BASE = 2  # Base delay in seconds
 
 # ==========================================
 # SESSION STATE ENUM
@@ -246,30 +254,55 @@ def start_webhook_server():
     print(f"🌐 Webhook server on port {WEBHOOK_PORT}")
 
 # ==========================================
-# UPLOAD FUNCTION WITH QUEUE BACKPRESSURE
+# UPLOAD FUNCTION WITH QUEUE BACKPRESSURE AND RETRY LOGIC
 # ==========================================
 def upload_task(camera_name, url, image_buffer, ts, current_count, max_images, detection_id):
-    """Upload task submitted to thread pool"""
-    try:
-        files = {'image': (f"{camera_name}_{ts}.jpg", image_buffer, 'image/jpeg')}
-        data = {
-            'frame_num': current_count,
-            'total_frames': max_images,
-            'camera': camera_name,
-            'detection_id': detection_id
-        }
-        response = requests.post(url, files=files, data=data, timeout=5)
-        response.raise_for_status()
-        
-        if current_count == max_images:
-            state = camera_states[camera_name]
-            with state.lock:
-                if state.state == SessionState.ACTIVE:
-                    state.state = SessionState.WAITING_RESET
-                    state.last_waiting_start = time.time()
-            print(f"[{ts}] 🛑 {camera_name}: Last frame sent ({current_count}/{max_images})")
-    except Exception as e:
-        print(f"[{ts}] ✗ {camera_name}: Upload failed - {e}")
+    """Upload task submitted to thread pool with retry logic for 429 errors"""
+    max_retries = UPLOAD_MAX_RETRIES
+    
+    for attempt in range(max_retries):
+        try:
+            files = {'image': (f"{camera_name}_{ts}.jpg", image_buffer, 'image/jpeg')}
+            data = {
+                'frame_num': current_count,
+                'total_frames': max_images,
+                'camera': camera_name,
+                'detection_id': detection_id
+            }
+            response = requests.post(url, files=files, data=data, timeout=5)
+            response.raise_for_status()
+            
+            if current_count == max_images:
+                state = camera_states[camera_name]
+                with state.lock:
+                    if state.state == SessionState.ACTIVE:
+                        state.state = SessionState.WAITING_RESET
+                        state.last_waiting_start = time.time()
+                print(f"[{ts}] 🛑 {camera_name}: Last frame sent ({current_count}/{max_images})")
+            return  # Success, exit function
+            
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429 and attempt < max_retries - 1:
+                # Recorder busy - exponential backoff
+                wait_time = UPLOAD_RETRY_DELAY_BASE * (attempt + 1)  # 2, 4, 6 seconds
+                print(f"[{ts}] ⚠️ {camera_name}: Recorder busy (429), retrying in {wait_time}s... (attempt {attempt+1}/{max_retries})")
+                time.sleep(wait_time)
+            elif e.response.status_code == 503 and attempt < max_retries - 1:
+                # Service unavailable - shorter wait
+                print(f"[{ts}] ⚠️ {camera_name}: Recorder unavailable (503), retrying in 1s... (attempt {attempt+1}/{max_retries})")
+                time.sleep(1)
+            else:
+                print(f"[{ts}] ✗ {camera_name}: Upload failed - {e}")
+                break
+        except Exception as e:
+            if attempt < max_retries - 1:
+                wait_time = UPLOAD_RETRY_DELAY_BASE
+                print(f"[{ts}] ⚠️ {camera_name}: Upload error, retrying in {wait_time}s... (attempt {attempt+1}/{max_retries})")
+                time.sleep(wait_time)
+            else:
+                print(f"[{ts}] ✗ {camera_name}: Upload failed after {max_retries} attempts - {e}")
+                break
+
 
 def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_images, detection_id):
     """Draw bounding boxes and queue upload to thread pool with backpressure"""
@@ -301,12 +334,27 @@ def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_
 # YOLO WORKER WITH HEALTH CHECK
 # ==========================================
 def yolo_worker_process(input_q, output_q):
-    """Worker process for YOLO inference"""
-    model = YOLO("yolov8n.pt")
+    """Worker process for YOLO inference using ONNX"""
+    try:
+        print(f"Loading yolov8n.onnx for ONNX Runtime inference...")
+        model = YOLO("yolov8n.onnx", task='detect')
+        print(f"Using ONNX Runtime with CPUExecutionProvider")
+    except Exception as e:
+        print(f"Failed to load ONNX model, falling back to PyTorch: {e}")
+        model = YOLO("yolov8n.pt", task='detect')
+    
     while True:
         try:
             name, frame, ts, capture_time = input_q.get(timeout=0.5)
-            results = model.predict(frame, imgsz=YOLO_INPUT_SIZE, conf=YOLO_CONFIDENCE, classes=[0], verbose=False)
+            # ✅ Add iou parameter here
+            results = model.predict(
+                frame, 
+                imgsz=YOLO_INPUT_SIZE, 
+                conf=YOLO_CONFIDENCE, 
+                iou=YOLO_IOU,  # ← ADD THIS LINE
+                classes=[0], 
+                verbose=False
+            )
             detections = [{"box": [int(x) for x in box.xyxy[0]], "conf": float(box.conf[0])} 
                          for box in results[0].boxes] if results[0].boxes else []
             output_q.put((name, frame, detections, ts, capture_time))
@@ -315,6 +363,7 @@ def yolo_worker_process(input_q, output_q):
         except Exception as e:
             print(f"YOLO worker error: {e}")
             time.sleep(1)
+
 
 def start_yolo_worker(task_q, result_q):
     """Start YOLO worker with monitoring"""
@@ -460,8 +509,14 @@ if __name__ == "__main__":
     print(f"MAX_IMAGES: {MAX_IMAGES} per camera")
     print(f"UPLOAD_WORKERS: {UPLOAD_WORKERS}")
     print(f"UPLOAD_QUEUE_SIZE: {UPLOAD_QUEUE_SIZE}")
+    print(f"UPLOAD_MAX_RETRIES: {UPLOAD_MAX_RETRIES}")
+    print(f"UPLOAD_RETRY_DELAY_BASE: {UPLOAD_RETRY_DELAY_BASE}s")
     print(f"YOLO_AUTO_RESTART: Enabled")
     print(f"YOLO_CONFIDENCE: {YOLO_CONFIDENCE}")
+    print(f"YOLO_INPUT_SIZE: {YOLO_INPUT_SIZE}")
+    print(f"YOLO_CONFIDENCE: {YOLO_CONFIDENCE}")
+    print(f"YOLO_IOU: {YOLO_IOU}")  # ← ADD THIS LINE
+    print(f"YOLO_INPUT_SIZE: {YOLO_INPUT_SIZE}")
     print(f"WEBHOOK_PORT: {WEBHOOK_PORT}")
     print(f"SESSION_TIMEOUT: {SESSION_TIMEOUT}s (idle sessions)")
     print(f"WATCHDOG: {WATCHDOG_CHECK}s check interval, {WATCHDOG_TIMEOUT}s timeout for stuck sessions")
@@ -496,7 +551,6 @@ if __name__ == "__main__":
                             state.state = SessionState.ACTIVE
                             state.count = 0
                             state.detection_id = None
-                            state.completed = False
                         
                         # Only process if active and not waiting
                         if state.state == SessionState.ACTIVE and state.count < MAX_IMAGES:
