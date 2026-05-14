@@ -318,7 +318,8 @@ def recording_loop():
                 # ✅ ADD THIS: Send reset to detector after successful recording
                 try:
 #                detector_ip
-                    detector_reset_url = "http://192.168.1.103:5001/reset"  # Your detector's webhook
+#                    detector_reset_url = "http://192.168.1.103:5001/reset"  # Your detector's webhook
+                    detector_reset_url = "http://192.168.1.103:5001/session-reset"  # ← Add "session-"
                     reset_payload = {
                         "camera": CAM_NAME,
                         "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
