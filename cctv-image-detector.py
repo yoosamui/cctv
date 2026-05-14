@@ -200,7 +200,7 @@ def session_reset():
             last_waiting_start[camera_name] = 0
             session_completed[camera_name] = True
             last_reset_time[camera_name] = now
-            """
+            
             if was_waiting:
                 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - DETECTION RESUMED (cooldown: {POST_RESET_COOLDOWN}s)")
             else:
@@ -208,7 +208,7 @@ def session_reset():
                 if old_count > 0:
                     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - CLEANED UP PARTIAL SESSION ({old_count}/6 frames)")
                 # Silent ignore for completely idle cameras (no log spam)
-            """
+            
             return '', 200
         
         return jsonify({"status": "ok"}), 200
