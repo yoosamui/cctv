@@ -11,6 +11,7 @@ infos.txt
 # C extensions
 *.so
 # Distribution / packaging
+models/
 .Python
 build/
 develop-eggs/
