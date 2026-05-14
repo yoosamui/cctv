@@ -1,7 +1,7 @@
 """
 CCTV Recorder with Person Detection
 ====================================
-Version: 1.8.1 - Duplicate Reset Prevention
+Version: 1.8.2 - Simplified Reset with Detector Deduplication
 """
 
 import subprocess
@@ -21,7 +21,7 @@ import re
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 
 # ================= CONFIGURATION LOADING =================
 config = configparser.ConfigParser()
@@ -81,10 +81,6 @@ shutdown_flag = False
 shutdown_lock = Lock()
 move_executor = ThreadPoolExecutor(max_workers=4)
 video_start_time_secs = datetime.now().timestamp()
-
-# ✅ ADDED: Duplicate reset prevention
-last_reset_sent_time = 0
-RESET_COOLDOWN_SECONDS = 5  # Only send reset every 5 seconds max
 
 # Create necessary directories
 os.makedirs(TEMP_DIR, exist_ok=True)
@@ -231,8 +227,7 @@ def health_check():
             "max_images": MAX_IMAGES_PER_SESSION,
             "current_video": current_video_prefix,
             "last_detection_id": last_detection_id,
-            "webhook_configured": WEBHOOK_SECRET is not None,
-            "reset_cooldown": RESET_COOLDOWN_SECONDS
+            "webhook_configured": WEBHOOK_SECRET is not None
         }, 200
 
 @app.route("/reset", methods=["POST"])
@@ -259,8 +254,7 @@ def status():
             "last_detection": last_detection_id,
             "max_per_session": MAX_IMAGES_PER_SESSION,
             "temp_dir": TEMP_DIR,
-            "base_dir": BASE_DIR,
-            "reset_cooldown": RESET_COOLDOWN_SECONDS
+            "base_dir": BASE_DIR
         }, 200
 
 def run_flask():
@@ -291,7 +285,9 @@ def kill_ffmpeg():
 # ================= RECORDING LOOP =================
 def recording_loop():
     """Main recording loop - captures video segments"""
-    global current_video_prefix, shutdown_flag, video_start_time_secs, last_reset_sent_time
+    global current_video_prefix, shutdown_flag, video_start_time_secs
+    
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔄 RECORDING LOOP STARTED for {CAM_NAME}", flush=True)
     
     while not shutdown_flag:
         kill_ffmpeg()
@@ -321,50 +317,44 @@ def recording_loop():
             if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
                 move_executor.submit(move_to_share_background, local_path, filename)
                 
-                # ✅ Send reset to detector after successful recording with duplicate prevention
-                current_time = time.time()
-                
-                # ✅ ONLY send reset if enough time has passed since last reset
-                if current_time - last_reset_sent_time >= RESET_COOLDOWN_SECONDS:
-                    last_reset_sent_time = current_time
+                # ✅ Send reset to detector after successful recording (NO COOLDOWN CHECK)
+                # Detector will handle duplicate resets with its own deduplication
+                try:
+                    detector_reset_url = "http://192.168.1.103:5001/session-reset"
+                    reset_payload = {
+                        "camera": CAM_NAME,
+                        "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                        "action": "reset"
+                    }
                     
-                    try:
-                        detector_reset_url = "http://192.168.1.103:5001/session-reset"
-                        reset_payload = {
-                            "camera": CAM_NAME,
-                            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                            "action": "reset"
-                        }
+                    headers = {
+                        'Content-Type': 'application/json',
+                        'X-API-KEY': WEBHOOK_SECRET
+                    }
+                    
+                    response = requests.post(
+                        detector_reset_url, 
+                        json=reset_payload, 
+                        headers=headers,
+                        timeout=2
+                    )
+                    
+                    if response.status_code == 200:
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] 📡 Reset sent to detector for {CAM_NAME}")
+                    else:
+                        print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Reset failed: {response.status_code}")
                         
-                        # ✅ ADD THE HEADERS WITH API KEY
-                        headers = {
-                            'Content-Type': 'application/json',
-                            'X-API-KEY': WEBHOOK_SECRET  # Must match detector's secret
-                        }
-                        
-                        response = requests.post(
-                            detector_reset_url, 
-                            json=reset_payload, 
-                            headers=headers,
-                            timeout=2
-                        )
-                        
-                        if response.status_code == 200:
-                            print(f"[{datetime.now().strftime('%H:%M:%S')}] 📡 Reset sent to detector for {CAM_NAME}")
-                        else:
-                            print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Reset failed: {response.status_code}")
-                            
-                    except Exception as e:
-                        print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Failed to send reset: {e}")
-                else:
-                    # Skip duplicate reset - log only in debug mode (commented out to reduce noise)
-                    # print(f"[{datetime.now().strftime('%H:%M:%S')}] ⏭️ Skipping duplicate reset for {CAM_NAME} (cooldown: {RESET_COOLDOWN_SECONDS}s)")
-                    pass
+                except Exception as e:
+                    print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Failed to send reset: {e}")
                     
         except subprocess.TimeoutExpired:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] ⏰ Recording timeout for {CAM_NAME}")
+        except subprocess.CalledProcessError as e:
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ FFmpeg failed with code {e.returncode}: {e}")
         except Exception as e:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ RECORDING ERROR: {e}", flush=True)
+            import traceback
+            traceback.print_exc()
             time.sleep(5)
 
 # ================= SIGNAL HANDLING =================
@@ -392,7 +382,6 @@ if __name__ == "__main__":
     print(f"Flask port: {FLASK_PORT}")
     print(f"Max images per session: {MAX_IMAGES_PER_SESSION}")
     print(f"Segment duration: {SEGMENT_DURATION}s")
-    print(f"Reset cooldown: {RESET_COOLDOWN_SECONDS}s")
     print(f"Webhook configured: {WEBHOOK_SECRET is not None}")
     print("=" * 60)
     

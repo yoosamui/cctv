@@ -108,6 +108,7 @@ SESSION_TIMEOUT = 600        # Seconds of inactivity before session timeout. 5 m
 WATCHDOG_TIMEOUT = 600       # 20 minutes timeout for stuck waiting sessions
 WATCHDOG_CHECK = 10          # Check watchdog every 10 seconds
 POST_RESET_COOLDOWN = 3      # Seconds to wait after reset before allowing new detections
+RESET_DEDUP_WINDOW = 2       # Ignore duplicate resets within 2 seconds
 
 # ==========================================
 # AUTHENTICATION
@@ -147,6 +148,8 @@ last_run = {n: 0 for n in NODES}
 last_activity = {n: 0 for n in NODES}  # Track last detection activity
 last_waiting_start = {n: 0 for n in NODES}  # Track when waiting state began
 last_reset_time = {n: 0 for n in NODES}  # Track when reset was last received
+session_completed = {n: False for n in NODES}  # Track if session was completed by recorder
+last_reset_processed = {n: 0 for n in NODES}  # Track last reset time for deduplication
 
 # ==========================================
 # FLASK WEBHOOK SERVER WITH AUTH
@@ -176,23 +179,47 @@ def session_reset():
         camera_name = data.get('camera')
         
         if camera_name and camera_name in session_waiting_reset:
-            if session_waiting_reset[camera_name]:  # Only log if actually waiting
-                session_waiting_reset[camera_name] = False
-                session_count[camera_name] = 0
-                session_detection_id[camera_name] = None  # Clear detection ID
-                last_waiting_start[camera_name] = 0  # Reset waiting start time
-                last_reset_time[camera_name] = time.time()  # Track reset time for cooldown
+            now = time.time()
+            
+            # ✅ IGNORE duplicate resets within RESET_DEDUP_WINDOW seconds
+            last_time = last_reset_processed.get(camera_name, 0)
+            if now - last_time < RESET_DEDUP_WINDOW:
+                # Silent ignore - duplicate reset
+                return '', 200
+            
+            # Update last reset time for this camera
+            last_reset_processed[camera_name] = now
+            
+            was_waiting = session_waiting_reset[camera_name]
+            old_count = session_count[camera_name]  # Store before clearing
+            
+            # Clear ALL session state for this camera
+            session_waiting_reset[camera_name] = False
+            session_count[camera_name] = 0
+            session_detection_id[camera_name] = None
+            last_waiting_start[camera_name] = 0
+            session_completed[camera_name] = True
+            last_reset_time[camera_name] = now
+            """
+            if was_waiting:
                 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - DETECTION RESUMED (cooldown: {POST_RESET_COOLDOWN}s)")
-                return '', 200
             else:
-                # Silent ignore - camera wasn't waiting
-                return '', 200
+                # Only log partial session cleanup if there were frames
+                if old_count > 0:
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - CLEANED UP PARTIAL SESSION ({old_count}/6 frames)")
+                # Silent ignore for completely idle cameras (no log spam)
+            """
+            return '', 200
         
-        # Silently ignore resets for cameras not waiting
         return jsonify({"status": "ok"}), 200
     except Exception as e:
         print(f"Error in session_reset: {e}")
         return jsonify({"status": "error", "error": str(e)}), 500
+
+@app.route('/reset', methods=['POST'])
+def reset_legacy():
+    """Legacy endpoint for compatibility with recorders calling /reset"""
+    return session_reset()
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -208,7 +235,8 @@ def health_check():
                 "last_activity": last_activity[name],
                 "last_upload": last_upload[name],
                 "waiting_seconds": int(time.time() - last_waiting_start[name]) if session_waiting_reset[name] else 0,
-                "cooldown_remaining": max(0, POST_RESET_COOLDOWN - int(time.time() - last_reset_time[name])) if last_reset_time[name] > 0 else 0
+                "cooldown_remaining": max(0, POST_RESET_COOLDOWN - int(time.time() - last_reset_time[name])) if last_reset_time[name] > 0 else 0,
+                "completed": session_completed[name]
             } for name in NODES
         }
     }), 200
@@ -232,27 +260,43 @@ def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_
         cv2.rectangle(frame, (x1, y1 - 20), (x1 + w, y1), yellow, -1)
         cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
     
-    try:
-        success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
-        if success:
-            files = {'image': (f"{camera_name}_{ts}.jpg", buffer.tobytes(), 'image/jpeg')}
-            data = {
-                'frame_num': current_count,
-                'total_frames': max_images,
-                'camera': camera_name,
-                'detection_id': detection_id
-            }
-            response = requests.post(url, files=files, data=data, timeout=5)
-            response.raise_for_status()
-            
-            if current_count == max_images:
-                print(f"[{ts}] 🛑 {camera_name}: Last frame sent ({current_count}/{max_images}) - waiting for recorder reset...")
-                session_waiting_reset[camera_name] = True
-                last_waiting_start[camera_name] = time.time()  # Track when waiting started
-                # Keep detection_id for debugging, will be cleared on reset
+    # Retry logic for upload failures
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+            if success:
+                files = {'image': (f"{camera_name}_{ts}.jpg", buffer.tobytes(), 'image/jpeg')}
+                data = {
+                    'frame_num': current_count,
+                    'total_frames': max_images,
+                    'camera': camera_name,
+                    'detection_id': detection_id
+                }
+                response = requests.post(url, files=files, data=data, timeout=5)
+                response.raise_for_status()
                 
-    except Exception as e:
-        print(f"[{ts}] ✗ {camera_name}: Upload failed - {e}")
+                if current_count == max_images:
+                    print(f"[{ts}] 🛑 {camera_name}: Last frame sent ({current_count}/{max_images}) - waiting for recorder reset...")
+                    session_waiting_reset[camera_name] = True
+                    last_waiting_start[camera_name] = time.time()  # Track when waiting started
+                    session_completed[camera_name] = False  # Reset completed flag for new session
+                return  # Success, exit function
+                
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 503 and attempt < max_retries - 1:
+                print(f"[{ts}] ⚠️ {camera_name}: 503 error, retrying in 1s... (attempt {attempt+1}/{max_retries})")
+                time.sleep(1)
+            else:
+                print(f"[{ts}] ✗ {camera_name}: Upload failed - {e}")
+                break
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"[{ts}] ⚠️ {camera_name}: Upload error, retrying in 1s... (attempt {attempt+1}/{max_retries})")
+                time.sleep(1)
+            else:
+                print(f"[{ts}] ✗ {camera_name}: Upload failed - {e}")
+                break
 
 # ==========================================
 # YOLO WORKER
@@ -332,26 +376,42 @@ def session_watchdog():
     """
     Periodically checks for stuck waiting sessions and idle sessions.
     Runs independently of frame processing.
+    
+    FIXED: Now properly respects sessions that were already reset by recorder
     """
     while True:
-        time.sleep(WATCHDOG_CHECK)  # Check every WATCHDOG_CHECK seconds
+        time.sleep(WATCHDOG_CHECK)
         now = time.time()
+        
         for name in NODES:
+            # Skip if session was already completed by recorder
+            if session_completed[name]:
+                # Reset the completed flag after a short time to allow new sessions
+                if now - last_reset_time[name] > 5:  # Clear completed flag after 5 seconds
+                    session_completed[name] = False
+                continue
+            
             # Check for stuck waiting sessions (recorder never responded)
             if session_waiting_reset[name] and last_waiting_start[name] > 0:
-                if (now - last_waiting_start[name]) > WATCHDOG_TIMEOUT:
-                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⚠️ Watchdog: {name} stuck waiting for {now - last_waiting_start[name]:.0f}s (timeout: {WATCHDOG_TIMEOUT}s). Force resetting.")
+                waiting_duration = now - last_waiting_start[name]
+                if waiting_duration > WATCHDOG_TIMEOUT:
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⚠️ Watchdog: {name} stuck waiting for {waiting_duration:.0f}s (timeout: {WATCHDOG_TIMEOUT}s). Force resetting.")
                     session_waiting_reset[name] = False
                     session_count[name] = 0
                     session_detection_id[name] = None
                     last_waiting_start[name] = 0
+                    session_completed[name] = True
             
-            # Check for idle sessions (has count but no activity)
+            # Check for idle sessions but ONLY if NOT waiting for reset
             elif not session_waiting_reset[name] and session_count[name] > 0:
-                if (now - last_activity[name]) > SESSION_TIMEOUT:
-                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⏰ Session timeout: {name} - no activity for {now - last_activity[name]:.0f}s (timeout: {SESSION_TIMEOUT}s). Resetting.")
+                idle_duration = now - last_activity[name]
+                if idle_duration > SESSION_TIMEOUT:
+                    # Only log timeout if session wasn't already completed
+                    if not session_completed[name]:
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⏰ Session timeout: {name} - no activity for {idle_duration:.0f}s (timeout: {SESSION_TIMEOUT}s). Resetting.")
                     session_count[name] = 0
                     session_detection_id[name] = None
+                    session_completed[name] = True
 
 # ==========================================
 # MAIN
@@ -375,6 +435,7 @@ if __name__ == "__main__":
     print(f"SESSION_TIMEOUT: {SESSION_TIMEOUT}s (idle sessions)")
     print(f"WATCHDOG: {WATCHDOG_CHECK}s check interval, {WATCHDOG_TIMEOUT}s timeout for stuck sessions")
     print(f"POST_RESET_COOLDOWN: {POST_RESET_COOLDOWN}s (cooldown after reset)")
+    print(f"RESET_DEDUP_WINDOW: {RESET_DEDUP_WINDOW}s (ignore duplicate resets)")
     print("=" * 60)
     
     # Start watchdog thread
@@ -397,6 +458,10 @@ if __name__ == "__main__":
                     if cooldown_remaining > 0:
                         # Skip processing during cooldown
                         continue
+                    
+                    # Reset completed flag when starting new detection
+                    if session_count[name] == 0:
+                        session_completed[name] = False
                     
                     # Only process if not waiting for reset
                     if not session_waiting_reset[name] and session_count[name] < MAX_IMAGES:
