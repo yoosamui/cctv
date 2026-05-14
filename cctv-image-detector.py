@@ -35,7 +35,7 @@
 #   YOLO_CONFIDENCE = 0.40    Detection confidence (0.25 low, 0.50 high)
 #   YOLO_INPUT_SIZE = 320     Image size for AI (160 fast, 320 balanced, 640 accurate)
 #   SESSION_TIMEOUT = 30      Seconds to wait for recorder reset before forcing reset
-# 
+#
 # DEPENDENCIES:
 #   pip install ultralytics opencv-python flask requests python-dotenv
 #
@@ -461,7 +461,15 @@ if __name__ == "__main__":
     print(f"UPLOAD_WORKERS: {UPLOAD_WORKERS}")
     print(f"UPLOAD_QUEUE_SIZE: {UPLOAD_QUEUE_SIZE}")
     print(f"YOLO_AUTO_RESTART: Enabled")
+    print(f"YOLO_CONFIDENCE: {YOLO_CONFIDENCE}")
+    print(f"WEBHOOK_PORT: {WEBHOOK_PORT}")
+    print(f"SESSION_TIMEOUT: {SESSION_TIMEOUT}s (idle sessions)")
+    print(f"WATCHDOG: {WATCHDOG_CHECK}s check interval, {WATCHDOG_TIMEOUT}s timeout for stuck sessions")
+    print(f"POST_RESET_COOLDOWN: {POST_RESET_COOLDOWN}s (cooldown after reset)")
+    print(f"RESET_DEDUP_WINDOW: {RESET_DEDUP_WINDOW}s (ignore duplicate resets)")
     print("=" * 60)
+
+
     
     threading.Thread(target=session_watchdog, daemon=True).start()
     
