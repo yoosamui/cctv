@@ -165,7 +165,7 @@ def session_reset():
     """Called by RPi recorder when a session is complete"""
     # Verify authentication
     if not verify_auth():
-        print(f"[{time.strftime('%H:%M:%S')}] ⚠️ Unauthorized reset attempt from {request.remote_addr}")
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⚠️ Unauthorized reset attempt from {request.remote_addr}")
         return jsonify({"status": "unauthorized", "error": "Invalid API key"}), 401
     
     try:
@@ -182,7 +182,7 @@ def session_reset():
                 session_detection_id[camera_name] = None  # Clear detection ID
                 last_waiting_start[camera_name] = 0  # Reset waiting start time
                 last_reset_time[camera_name] = time.time()  # Track reset time for cooldown
-                print(f"[{time.strftime('%H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - DETECTION RESUMED (cooldown: {POST_RESET_COOLDOWN}s)")
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - DETECTION RESUMED (cooldown: {POST_RESET_COOLDOWN}s)")
                 return '', 200
             else:
                 # Silent ignore - camera wasn't waiting
@@ -340,7 +340,7 @@ def session_watchdog():
             # Check for stuck waiting sessions (recorder never responded)
             if session_waiting_reset[name] and last_waiting_start[name] > 0:
                 if (now - last_waiting_start[name]) > WATCHDOG_TIMEOUT:
-                    print(f"[{time.strftime('%H:%M:%S')}] ⚠️ Watchdog: {name} stuck waiting for {now - last_waiting_start[name]:.0f}s (timeout: {WATCHDOG_TIMEOUT}s). Force resetting.")
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⚠️ Watchdog: {name} stuck waiting for {now - last_waiting_start[name]:.0f}s (timeout: {WATCHDOG_TIMEOUT}s). Force resetting.")
                     session_waiting_reset[name] = False
                     session_count[name] = 0
                     session_detection_id[name] = None
@@ -349,7 +349,7 @@ def session_watchdog():
             # Check for idle sessions (has count but no activity)
             elif not session_waiting_reset[name] and session_count[name] > 0:
                 if (now - last_activity[name]) > SESSION_TIMEOUT:
-                    print(f"[{time.strftime('%H:%M:%S')}] ⏰ Session timeout: {name} - no activity for {now - last_activity[name]:.0f}s (timeout: {SESSION_TIMEOUT}s). Resetting.")
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⏰ Session timeout: {name} - no activity for {now - last_activity[name]:.0f}s (timeout: {SESSION_TIMEOUT}s). Resetting.")
                     session_count[name] = 0
                     session_detection_id[name] = None
 
@@ -444,7 +444,7 @@ if __name__ == "__main__":
                     frame = streams[name].get_frame()
                     if frame is not None:
                         try:
-                            task_q.put_nowait((name, frame, time.strftime('%H:%M:%S')))
+                            task_q.put_nowait((name, frame, time.strftime('%Y-%m-%d %H:%M:%S')))
                             last_run[name] = now
                         except:
                             pass
