@@ -183,40 +183,40 @@ def session_reset():
     if not verify_auth():
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⚠️ Unauthorized reset attempt from {request.remote_addr}")
         return jsonify({"status": "unauthorized"}), 401
-    
+
     try:
         data = request.get_json()
         if not data:
             return jsonify({"status": "error"}), 400
-            
+
         camera_name = data.get('camera')
         if not camera_name or camera_name not in camera_states:
             return jsonify({"status": "ok"}), 200
-        
+
         state = camera_states[camera_name]
         now = time.time()
-        
+
         with state.lock:
             # Deduplicate resets
             if now - state.last_reset_processed < RESET_DEDUP_WINDOW:
                 return '', 200
-            
+
             state.last_reset_processed = now
             was_waiting = (state.state == SessionState.WAITING_RESET)
             old_count = state.count
-            
+
             # Clear session state
             state.state = SessionState.COMPLETED
             state.count = 0
             state.detection_id = None
             state.last_waiting_start = 0
             state.last_reset_time = now
-            
+
             if was_waiting:
                 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - DETECTION RESUMED")
             elif old_count > 0:
                 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - CLEANED UP PARTIAL SESSION ({old_count}/6 frames)")
-            
+
         return '', 200
     except Exception as e:
         print(f"Error in session_reset: {e}")
@@ -229,7 +229,7 @@ def reset_legacy():
 @app.route('/health', methods=['GET'])
 def health_check():
     global dropped_frames, dropped_uploads
-    
+
     camera_stats = {}
     for name, state in camera_states.items():
         with state.lock:
@@ -238,7 +238,7 @@ def health_check():
                 "count": state.count,
                 "detection_id": state.detection_id
             }
-    
+
     return jsonify({
         "status": "running",
         "version": VERSION,
@@ -259,7 +259,7 @@ def start_webhook_server():
 def upload_task(camera_name, url, image_buffer, ts, current_count, max_images, detection_id):
     """Upload task submitted to thread pool with retry logic for 429 errors"""
     max_retries = UPLOAD_MAX_RETRIES
-    
+
     for attempt in range(max_retries):
         try:
             files = {'image': (f"{camera_name}_{ts}.jpg", image_buffer, 'image/jpeg')}
@@ -271,7 +271,7 @@ def upload_task(camera_name, url, image_buffer, ts, current_count, max_images, d
             }
             response = requests.post(url, files=files, data=data, timeout=5)
             response.raise_for_status()
-            
+
             if current_count == max_images:
                 state = camera_states[camera_name]
                 with state.lock:
@@ -280,7 +280,7 @@ def upload_task(camera_name, url, image_buffer, ts, current_count, max_images, d
                         state.last_waiting_start = time.time()
                 print(f"[{ts}] 🛑 {camera_name}: Last frame sent ({current_count}/{max_images})")
             return  # Success, exit function
-            
+
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 429 and attempt < max_retries - 1:
                 # Recorder busy - exponential backoff
@@ -314,7 +314,7 @@ def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_
         (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(frame, (x1, y1 - 20), (x1 + w, y1), yellow, -1)
         cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
-    
+
     success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
     if success:
         # ✅ BACKPRESSURE: Check queue size before submitting
@@ -326,8 +326,8 @@ def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_
                 if dropped_uploads % 10 == 0:
                     print(f"[{ts}] ⚠️ Upload queue full ({queue_size}), dropped frame {current_count}/{max_images}")
             return
-        
-        upload_executor.submit(upload_task, camera_name, url, buffer.tobytes(), 
+
+        upload_executor.submit(upload_task, camera_name, url, buffer.tobytes(),
                                ts, current_count, max_images, detection_id)
 
 # ==========================================
@@ -342,20 +342,20 @@ def yolo_worker_process(input_q, output_q):
     except Exception as e:
         print(f"Failed to load ONNX model, falling back to PyTorch: {e}")
         model = YOLO("yolov8n.pt", task='detect')
-    
+
     while True:
         try:
             name, frame, ts, capture_time = input_q.get(timeout=0.5)
             # ✅ Add iou parameter here
             results = model.predict(
-                frame, 
-                imgsz=YOLO_INPUT_SIZE, 
-                conf=YOLO_CONFIDENCE, 
+                frame,
+                imgsz=YOLO_INPUT_SIZE,
+                conf=YOLO_CONFIDENCE,
                 iou=YOLO_IOU,  # ← ADD THIS LINE
-                classes=[0], 
+                classes=[0],
                 verbose=False
             )
-            detections = [{"box": [int(x) for x in box.xyxy[0]], "conf": float(box.conf[0])} 
+            detections = [{"box": [int(x) for x in box.xyxy[0]], "conf": float(box.conf[0])}
                          for box in results[0].boxes] if results[0].boxes else []
             output_q.put((name, frame, detections, ts, capture_time))
         except Empty:
@@ -370,7 +370,7 @@ def start_yolo_worker(task_q, result_q):
     global yolo_process
     if yolo_process and yolo_process.is_alive():
         return yolo_process
-    
+
     yolo_process = multiprocessing.Process(target=yolo_worker_process, args=(task_q, result_q), daemon=True)
     yolo_process.start()
     return yolo_process
@@ -394,7 +394,7 @@ def check_yolo_health(task_q, result_q):
 # ==========================================
 class CameraStream:
     """Thread-safe camera stream handler with auto-reconnect"""
-    
+
     def __init__(self, name, url):
         self.name = name
         self.url = url
@@ -403,12 +403,12 @@ class CameraStream:
         self.frame_time = 0
         self.running = True
         threading.Thread(target=self.update, daemon=True).start()
-    
+
     def update(self):
         cap = None
         consecutive_failures = 0
         max_failures = 5
-        
+
         while self.running:
             try:
                 if cap is None:
@@ -416,9 +416,9 @@ class CameraStream:
                     if not cap.isOpened():
                         raise Exception("Failed to open camera")
                     consecutive_failures = 0
-                
+
                 ret, frame = cap.read()
-                
+
                 if ret and frame is not None:
                     # ✅ Thread-safe frame update
                     with self.lock:
@@ -433,22 +433,22 @@ class CameraStream:
                         consecutive_failures = 0
                         time.sleep(2)
                         continue
-                
+
                 time.sleep(CAM_THREAD_SLEEP)
-                
+
             except Exception as e:
                 if cap:
                     cap.release()
                     cap = None
                 time.sleep(2)
-    
+
     def get_frame(self):
         """Return a copy of the latest frame (thread-safe)"""
         with self.lock:
             if self.frame is not None:
                 return self.frame.copy(), self.frame_time
         return None, 0
-    
+
     def stop(self):
         self.running = True
 
@@ -460,7 +460,7 @@ def session_watchdog():
     while True:
         time.sleep(WATCHDOG_CHECK)
         now = time.time()
-        
+
         for name, state in camera_states.items():
             with state.lock:
                 # Clean up COMPLETED state after cooldown
@@ -468,7 +468,7 @@ def session_watchdog():
                     if now - state.last_reset_time > 5:
                         state.state = SessionState.IDLE
                     continue
-                
+
                 # Check for stuck WAITING_RESET sessions
                 if state.state == SessionState.WAITING_RESET and state.last_waiting_start > 0:
                     waiting_duration = now - state.last_waiting_start
@@ -478,7 +478,7 @@ def session_watchdog():
                         state.count = 0
                         state.detection_id = None
                         state.last_waiting_start = 0
-                
+
                 # Check for idle ACTIVE sessions
                 elif state.state == SessionState.ACTIVE and state.count > 0:
                     idle_duration = now - state.last_activity
@@ -493,16 +493,16 @@ def session_watchdog():
 # ==========================================
 if __name__ == "__main__":
     start_webhook_server()
-    
+
     task_q = multiprocessing.Queue(maxsize=10)
     result_q = multiprocessing.Queue()
-    
+
     start_yolo_worker(task_q, result_q)
     threading.Thread(target=check_yolo_health, args=(task_q, result_q), daemon=True).start()
-    
+
     streams = {n: CameraStream(n, cfg["cam_rtsp"]) for n, cfg in NODES.items()}
     time.sleep(2)
-    
+
     print("=" * 60)
     print(f"CCTV DETECTOR v{VERSION} - WITH THREAD-SAFE STATE")
     print(f"ANALYSIS_INTERVAL: {ANALYSIS_INTERVAL}s")
@@ -514,7 +514,6 @@ if __name__ == "__main__":
     print(f"YOLO_AUTO_RESTART: Enabled")
     print(f"YOLO_CONFIDENCE: {YOLO_CONFIDENCE}")
     print(f"YOLO_INPUT_SIZE: {YOLO_INPUT_SIZE}")
-    print(f"YOLO_CONFIDENCE: {YOLO_CONFIDENCE}")
     print(f"YOLO_IOU: {YOLO_IOU}")  # ← ADD THIS LINE
     print(f"YOLO_INPUT_SIZE: {YOLO_INPUT_SIZE}")
     print(f"WEBHOOK_PORT: {WEBHOOK_PORT}")
@@ -525,9 +524,9 @@ if __name__ == "__main__":
     print("=" * 60)
 
 
-    
+
     threading.Thread(target=session_watchdog, daemon=True).start()
-    
+
     def handle_results():
         global dropped_frames
         while True:
@@ -535,69 +534,69 @@ if __name__ == "__main__":
                 name, frame, detections, ts, capture_time = result_q.get(timeout=0.01)
                 now = time.time()
                 state = camera_states[name]
-                
+
                 with state.lock:
                     state.last_run = now
-                
+
                 if detections:
                     with state.lock:
                         cooldown_remaining = POST_RESET_COOLDOWN - (now - state.last_reset_time) if state.last_reset_time > 0 else 0
-                        
+
                         if cooldown_remaining > 0:
                             continue
-                        
+
                         # Start new session if idle
                         if state.state == SessionState.IDLE:
                             state.state = SessionState.ACTIVE
                             state.count = 0
                             state.detection_id = None
-                        
+
                         # Only process if active and not waiting
                         if state.state == SessionState.ACTIVE and state.count < MAX_IMAGES:
                             if state.count == 0 and (now - state.last_upload < COOLDOWN):
                                 continue
-                            
+
                             if state.count == 0:
                                 state.detection_id = str(uuid.uuid4())[:8]
                                 print(f"[{ts}] 🆔 {name}: New detection session {state.detection_id}")
-                            
+
                             state.count += 1
                             state.last_activity = capture_time
                             current_count = state.count
                             detection_id = state.detection_id
                             print(f"[{ts}] ⚡ {name}: {state.count}/{MAX_IMAGES}")
-                    
+
                     # Get frame outside lock to avoid holding it during upload
                     full_frame, frame_time = streams[name].get_frame()
                     if full_frame is not None:
                         draw_and_upload(name, NODES[name]["rpi_url"], full_frame, detections, ts,
                                       current_count, MAX_IMAGES, detection_id)
-                    
+
                     with state.lock:
                         state.last_upload = now
-                        
+
             except Empty:
                 continue
             except Exception as e:
                 print(f"Handler error: {e}")
-    
+
     threading.Thread(target=handle_results, daemon=True).start()
-    
+
     # Main loop with backpressure handling
     try:
         while True:
             now = time.time()
-            
+
             for name in NODES:
                 state = camera_states[name]
                 with state.lock:
                     if state.state == SessionState.WAITING_RESET:
                         continue
                     skip = now - state.last_run < ANALYSIS_INTERVAL
-                
+
                 if skip:
                     continue
-                    
+
                 frame, frame_time = streams[name].get_frame()
                 if frame is not None:
                     try:
@@ -609,9 +608,9 @@ if __name__ == "__main__":
                             dropped_frames += 1
                             if dropped_frames % 100 == 0:
                                 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⚠️ Dropped {dropped_frames} frames (queue full)")
-            
+
             time.sleep(0.05)
-            
+
     except KeyboardInterrupt:
         print("\nShutting down...")
         upload_executor.shutdown(wait=True)
