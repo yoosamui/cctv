@@ -10,9 +10,12 @@ ExecStart=/home/ops/cctv/PYEVO/bin/python3  -u /home/ops/cctv/cctv-image-detecto
 Restart=always
 RestartSec=5
 # This ensures logs go to the right place
+# Log to BOTH journal and file
 StandardOutput=journal
 StandardError=journal
-
+# Or redirect to file: Write to file AND still keep in journal
+# StandardOutput=append:/home/ops/cctv/cctv_detector.log
+# StandardError=append:/home/ops/cctv/cctv_detector.log
 
 [Install]
 WantedBy=multi-user.target
