@@ -315,21 +315,33 @@ def recording_loop():
             if os.path.exists(local_path) and os.path.getsize(local_path) > 0:
                 move_executor.submit(move_to_share_background, local_path, filename)
                 
-                # ✅ ADD THIS: Send reset to detector after successful recording
+                # ✅ Send reset to detector after successful recording
                 try:
-#                detector_ip
-#                    detector_reset_url = "http://192.168.1.103:5001/reset"  # Your detector's webhook
-                    detector_reset_url = "http://192.168.1.103:5001/session-reset"  # ← Add "session-"
+                    detector_reset_url = "http://192.168.1.103:5001/session-reset"
                     reset_payload = {
                         "camera": CAM_NAME,
                         "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                         "action": "reset"
                     }
-                    response = requests.post(detector_reset_url, json=reset_payload, timeout=2)
+                    
+                    # ✅ ADD THE HEADERS WITH API KEY
+                    headers = {
+                        'Content-Type': 'application/json',
+                        'X-API-KEY': WEBHOOK_SECRET  # Must match detector's secret
+                    }
+                    
+                    response = requests.post(
+                        detector_reset_url, 
+                        json=reset_payload, 
+                        headers=headers,  # ← Now sending authentication
+                        timeout=2
+                    )
+                    
                     if response.status_code == 200:
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] 📡 Reset sent to detector for {CAM_NAME}")
                     else:
                         print(f"[{datetime.now().strftime('%H:%M:%S')}] ⚠️ Reset failed: {response.status_code}")
+                        
                 except Exception as e:
                     print(f"[{datetime.now().strftime('%H:%M:%S')}] ❌ Failed to send reset: {e}")
                     
