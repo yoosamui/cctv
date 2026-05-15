@@ -1,58 +1,17 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.23.4
+# CCTV IMAGE DETECTOR - VERSION 3.23.6
 # ==============================================================================
 #
-# IMPROVEMENTS in v3.23.2:
-#   1. Increased POST_RESET_COOLDOWN from 3s to 6s to prevent recorder rejects
-#   2. Added session validation to reject stale uploads from previous sessions
-#   3. Prevent new detections during cooldown period after reset
-#   4. Fixed race condition where old session frames would be accepted after reset
+# IMPROVEMENTS in v3.23.6:
+#   1. Replaced unsafe _work_queue.qsize() with thread-safe counter
+#   2. Fixed private attribute access for better portability
 #
-# IMPROVEMENTS in v3.23.1:
-#   1. Added 429 error handling with exponential backoff
-#   2. Increased retry delays for recorder busy states
-#   3. Better upload resilience
+# IMPROVEMENTS in v3.23.5:
+#   1. Added bounded queues for memory safety
+#   2. Fixed CameraStream.stop() bug
 #
-# IMPROVEMENTS in v3.23.0:
-#   1. Reduced WATCHDOG_TIMEOUT from 600s to 120s for faster recovery
-#   2. Increased YOLO_INPUT_SIZE from 320 to 480 for better accuracy
-#   3. Updated configuration comments for clarity
-#
-# IMPROVEMENTS in v3.22.1:
-#   1. Fixed upload queue with proper backpressure
-#   2. Thread-safe frame access with locks
-#   3. Session state enum instead of multiple booleans
-#   4. Proper YOLO process cleanup with join()
-#   5. Optimized frame handling (reduced copies)
-#
-# WHAT THIS DOES:
-#   Detects people in 6 CCTV camera streams using YOLOv8
-#   Sends annotated images to Raspberry Pi recorders
-#   Receives reset signals when recorders finish saving
-#
-# HOW IT WORKS:
-#   1. CameraStream threads capture frames from RTSP streams
-#   2. YOLO worker process detects people (parallel inference)
-#   3. When person detected -> upload 6 frames to RPi recorder
-#   4. After 6th frame -> wait for recorder to signal completion
-#   5. Recorder signals back via HTTP POST -> reset session
-#
-# ARCHITECTURE:
-#   [6 Cameras] -> [Detector RPI 5] -> [6 RPis 4B] -> [Save Images]
-#                      ↑                      │
-#                      └─── Reset Signal ─────┘
-#                      └───> send images ─────┘
-#
-#
-# DEPENDENCIES:
-#   pip install ultralytics opencv-python flask requests python-dotenv
-#
-# USAGE:
-#   python3 cctv_image_detector.py
-#
-# AUTHOR: yoosamui
-# DATE: 2026-05-15
+# [Previous improvements remain...]
 # ==============================================================================
 
 import cv2
@@ -81,7 +40,7 @@ logging.getLogger('werkzeug').setLevel(logging.CRITICAL)
 logging.getLogger('requests').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 
-VERSION = "3.23.4"
+VERSION = "3.23.6"
 
 # ==========================================
 # CONFIGURATION
@@ -217,6 +176,20 @@ UPLOAD_MAX_RETRIES = 3
 # attempt 3 -> 6s
 UPLOAD_RETRY_DELAY_BASE = 2
 
+
+# ==========================================
+# QUEUE SETTINGS
+# ==========================================
+
+# Max pending frames for YOLO processing
+# Prevents unlimited RAM growth if YOLO worker is slow
+TASK_QUEUE_SIZE = 10
+
+# Max pending detection results from YOLO
+# Prevents memory leak under heavy detection load
+RESULT_QUEUE_SIZE = 20
+
+
 # ==========================================
 # SESSION STATE ENUM
 # ==========================================
@@ -225,6 +198,14 @@ class SessionState(Enum):
     ACTIVE = 1         # Collecting frames (1-5/6)
     WAITING_RESET = 2  # Sent 6/6, waiting for recorder
     COMPLETED = 3      # Reset received, ready for cleanup
+
+
+# ==========================================
+# UPLOAD QUEUE TRACKING (THREAD-SAFE COUNTER)
+# ==========================================
+pending_uploads = 0
+pending_uploads_lock = threading.Lock()
+
 
 # ==========================================
 # AUTHENTICATION
@@ -283,6 +264,7 @@ dropped_frames_lock = threading.Lock()
 # YOLO worker health
 yolo_process = None
 
+
 # ==========================================
 # FLASK WEBHOOK SERVER
 # ==========================================
@@ -318,7 +300,6 @@ def session_reset():
             state.last_reset_processed = now
             was_waiting = (state.state == SessionState.WAITING_RESET)
             old_count = state.count
-            old_session_id = state.active_session_id
 
             # Clear session state
             state.state = SessionState.COMPLETED
@@ -344,7 +325,7 @@ def reset_legacy():
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    global dropped_frames, dropped_uploads
+    global dropped_frames, dropped_uploads, pending_uploads
 
     camera_stats = {}
     for name, state in camera_states.items():
@@ -361,8 +342,8 @@ def health_check():
         "version": VERSION,
         "dropped_frames": dropped_frames,
         "dropped_uploads": dropped_uploads,
+        "pending_uploads": pending_uploads,
         "yolo_alive": yolo_process and yolo_process.is_alive() if yolo_process else False,
-        "upload_queue_size": upload_executor._work_queue.qsize(),
         "cameras": camera_stats
     }), 200
 
@@ -519,6 +500,8 @@ def upload_task(camera_name, url, image_buffer, ts, current_count, max_images, d
 
 def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_images, detection_id):
     """Draw bounding boxes and queue upload to thread pool with backpressure"""
+    global pending_uploads, dropped_uploads
+    
     yellow = (0, 255, 255)
     for d in detections:
         x1, y1, x2, y2 = d["box"]
@@ -530,18 +513,26 @@ def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_
 
     success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
     if success:
-        # ✅ BACKPRESSURE: Check queue size before submitting
-        queue_size = upload_executor._work_queue.qsize()
-        if queue_size > UPLOAD_QUEUE_SIZE:
-            global dropped_uploads
-            with dropped_frames_lock:
+        # ✅ BACKPRESSURE: Check queue size using thread-safe counter
+        with pending_uploads_lock:
+            if pending_uploads >= UPLOAD_QUEUE_SIZE:
                 dropped_uploads += 1
                 if dropped_uploads % 10 == 0:
-                    print(f"[{ts}] ⚠️ Upload queue full ({queue_size}), dropped frame {current_count}/{max_images}")
-            return
-
-        upload_executor.submit(upload_task, camera_name, url, buffer.tobytes(),
+                    print(f"[{ts}] ⚠️ Upload queue full ({pending_uploads} pending), dropped frame {current_count}/{max_images}")
+                return
+            pending_uploads += 1
+        
+        def upload_wrapper(*args, **kwargs):
+            try:
+                return upload_task(*args, **kwargs)
+            finally:
+                with pending_uploads_lock:
+                    global pending_uploads
+                    pending_uploads -= 1
+        
+        upload_executor.submit(upload_wrapper, camera_name, url, buffer.tobytes(),
                                ts, current_count, max_images, detection_id)
+
 
 # ==========================================
 # YOLO WORKER WITH HEALTH CHECK
@@ -601,6 +592,7 @@ def check_yolo_health(task_q, result_q):
                 yolo_process = multiprocessing.Process(target=yolo_worker_process, args=(task_q, result_q), daemon=True)
                 yolo_process.start()
                 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ YOLO worker restarted")
+
 
 # ==========================================
 # CAMERA STREAM (THREAD-SAFE)
@@ -663,7 +655,8 @@ class CameraStream:
         return None, 0
 
     def stop(self):
-        self.running = True
+        self.running = False
+
 
 # ==========================================
 # SESSION WATCHDOG (USING STATE ENUM)
@@ -703,16 +696,21 @@ def session_watchdog():
                         state.detection_id = None
                         state.active_session_id = None
 
+
 # ==========================================
 # MAIN
 # ==========================================
 if __name__ == "__main__":
+    
     start_webhook_server()
 
-    task_q = multiprocessing.Queue(maxsize=10)
-    result_q = multiprocessing.Queue()
+    # ✅ Both queues now have bounds to prevent memory leaks
+    task_q = multiprocessing.Queue(maxsize=TASK_QUEUE_SIZE)
+    result_q = multiprocessing.Queue(maxsize=RESULT_QUEUE_SIZE)
 
     start_yolo_worker(task_q, result_q)
+    
+    
     threading.Thread(target=check_yolo_health, args=(task_q, result_q), daemon=True).start()
 
     streams = {n: CameraStream(n, cfg["cam_rtsp"]) for n, cfg in NODES.items()}
