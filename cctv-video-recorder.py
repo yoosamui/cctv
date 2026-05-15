@@ -3,7 +3,7 @@
 """
 CCTV Recorder with Person Detection
 ====================================
-Version: 1.8.6 - Improved Cleanup & Performance
+Version: 1.8.6 - Improved Cleanup & Performance & security
 """
 
 import subprocess
