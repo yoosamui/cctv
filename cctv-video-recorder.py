@@ -136,7 +136,7 @@ log.setLevel(logging.ERROR)
 def get_camera_dir():
     """Returns camera-specific folder path."""
 
-    today = datetime.now().strftime("%Y-%m-%d %Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d")
 
     camera_path = os.path.join(
         BASE_DIR,
