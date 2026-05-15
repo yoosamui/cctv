@@ -20,7 +20,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-VERSION = "1.8.2"
+VERSION = "1.8.3"
 
 # ================= CONFIGURATION LOADING =================
 config = configparser.ConfigParser()
