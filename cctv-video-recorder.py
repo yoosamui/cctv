@@ -30,7 +30,7 @@ config_file = os.path.join(os.path.dirname(__file__), 'config.ini')
 def load_config():
     """Reads settings from config.ini with fallback defaults."""
     if not os.path.exists(config_file):
-        print(f"[{datetime.now().strftime('%H:%M:%S')}] ERROR: {config_file} not found!")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ERROR: {config_file} not found!")
         sys.exit(1)
 
     config.read(config_file)
@@ -136,7 +136,7 @@ log.setLevel(logging.ERROR)
 def get_camera_dir():
     """Returns camera-specific folder path."""
 
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = datetime.now().strftime("%Y-%m-%d %Y-%m-%d")
 
     camera_path = os.path.join(
         BASE_DIR,
@@ -155,7 +155,7 @@ def send_reset_to_detector():
 
     if not WEBHOOK_SECRET:
         print(
-            f"[{datetime.now().strftime('%H:%M:%S')}] "
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
             f"❌ Cannot send reset: No WEBHOOK_SECRET configured"
         )
         return False
@@ -184,7 +184,7 @@ def send_reset_to_detector():
             if response.status_code == 200:
 
                 print(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] "
+                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                     f"✅ {CAM_NAME} session reset confirmed"
                 )
 
@@ -193,7 +193,7 @@ def send_reset_to_detector():
             elif response.status_code == 401:
 
                 print(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] "
+                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                     f"❌ AUTH ERROR: API key mismatch for {CAM_NAME}"
                 )
 
@@ -202,7 +202,7 @@ def send_reset_to_detector():
             else:
 
                 print(
-                    f"[{datetime.now().strftime('%H:%M:%S')}] "
+                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                     f"⚠️ Attempt {attempt+1}/{max_retries}: "
                     f"HTTP {response.status_code}"
                 )
@@ -210,7 +210,7 @@ def send_reset_to_detector():
         except requests.exceptions.ConnectionError:
 
             print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] "
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                 f"⚠️ Attempt {attempt+1}/{max_retries}: "
                 f"Cannot connect to detector"
             )
@@ -218,7 +218,7 @@ def send_reset_to_detector():
         except requests.exceptions.Timeout:
 
             print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] "
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                 f"⚠️ Attempt {attempt+1}/{max_retries}: "
                 f"Timeout connecting to detector"
             )
@@ -226,7 +226,7 @@ def send_reset_to_detector():
         except Exception as e:
 
             print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] "
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                 f"❌ Reset error: {e}"
             )
 
@@ -234,7 +234,7 @@ def send_reset_to_detector():
             time.sleep(2)
 
     print(
-        f"[{datetime.now().strftime('%H:%M:%S')}] "
+        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
         f"❌ Failed to send reset after {max_retries} attempts"
     )
 
@@ -272,7 +272,7 @@ def upload_image():
             session_image_count = 0
 
             print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] "
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                 f"🆔 New detection session: "
                 f"{detection_id} for {camera_name}"
             )
@@ -281,7 +281,7 @@ def upload_image():
         if session_image_count >= MAX_IMAGES_PER_SESSION:
 
             print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] "
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                 f"⚠️ REJECTED: {camera_name} - "
                 f"limit reached ({MAX_IMAGES_PER_SESSION})"
             )
@@ -308,7 +308,7 @@ def upload_image():
 
     target_dir = get_camera_dir()
 
-    actual_time = datetime.now().strftime("%H-%M-%S-%f")[:-3]
+    actual_time = datetime.now().strftime("%Y-%m-%d %H-%M-%S-%f")[:-3]
 
     detection_tag = f"_{detection_id}" if detection_id else ""
 
@@ -324,7 +324,7 @@ def upload_image():
         file.save(save_path)
 
         print(
-            f"[{datetime.now().strftime('%H:%M:%S')}] "
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
             f"📸 {camera_name}: IMAGE "
             f"{current_count}/{total_frames} "
             f"(ID: {detection_id})",
@@ -334,7 +334,7 @@ def upload_image():
         if current_count == total_frames:
 
             print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] "
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                 f"✅ {camera_name}: Detection session "
                 f"{detection_id} complete "
                 f"({total_frames}/{total_frames})"
@@ -351,7 +351,7 @@ def upload_image():
     except Exception as e:
 
         print(
-            f"[{datetime.now().strftime('%H:%M:%S')}] "
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
             f"❌ Save failed: {e}"
         )
 
@@ -390,7 +390,7 @@ def reset_session():
         last_detection_id = None
 
         print(
-            f"[{datetime.now().strftime('%H:%M:%S')}] "
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
             f"🔄 Manual reset of session counter for {CAM_NAME}"
         )
 
@@ -445,7 +445,7 @@ def move_to_share_background(local_path, filename):
             shutil.move(local_path, final_path)
 
             print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] "
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                 f"📁 File moved to share: {filename}",
                 flush=True
             )
@@ -456,7 +456,7 @@ def move_to_share_background(local_path, filename):
     except Exception as e:
 
         print(
-            f"[{datetime.now().strftime('%H:%M:%S')}] "
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
             f"❌ BACKGROUND MOVE FAILED: {e}",
             flush=True
         )
@@ -481,7 +481,7 @@ def recording_loop():
     global shutdown_flag
 
     print(
-        f"[{datetime.now().strftime('%H:%M:%S')}] "
+        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
         f"🔄 RECORDING LOOP STARTED for {CAM_NAME}",
         flush=True
     )
@@ -536,7 +536,7 @@ def recording_loop():
         try:
 
             print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] "
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                 f"🎥 RECORDING: {filename}",
                 flush=True
             )
@@ -562,14 +562,14 @@ def recording_loop():
         except subprocess.TimeoutExpired:
 
             print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] "
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                 f"⏰ Recording timeout for {CAM_NAME}"
             )
 
         except subprocess.CalledProcessError as e:
 
             print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] "
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                 f"❌ FFmpeg failed with code "
                 f"{e.returncode}: {e}"
             )
@@ -577,7 +577,7 @@ def recording_loop():
         except Exception as e:
 
             print(
-                f"[{datetime.now().strftime('%H:%M:%S')}] "
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
                 f"❌ RECORDING ERROR: {e}",
                 flush=True
             )
@@ -595,7 +595,7 @@ def signal_handler(signum, frame):
     global shutdown_flag
 
     print(
-        f"\n[{datetime.now().strftime('%H:%M:%S')}] "
+        f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
         f"🛑 Shutting down recorder for {CAM_NAME}..."
     )
 
@@ -662,7 +662,7 @@ if __name__ == "__main__":
     time.sleep(2)
 
     print(
-        f"[{datetime.now().strftime('%H:%M:%S')}] "
+        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
         f"✅ Recorder ready for {CAM_NAME}"
     )
 
