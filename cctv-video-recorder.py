@@ -1,5 +1,4 @@
-# Full CCTV Recorder Code v1.8.4
-
+# Full CCTV Recorder Code v1.8.5
 
 """
 CCTV Recorder with Person Detection
@@ -23,7 +22,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-VERSION = "1.8.4"
+VERSION = "1.8.5"
 
 # ================= CONFIGURATION LOADING =================
 config = configparser.ConfigParser()
@@ -157,6 +156,9 @@ app = Flask(__name__)
 # upload limit
 app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
 
+# Upload authentication
+UPLOAD_API_KEY = WEBHOOK_SECRET
+
 # Silence Flask logs
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
@@ -277,6 +279,27 @@ def send_reset_to_detector():
 @app.route("/upload", methods=["POST"])
 def upload_image():
     """Receives detection images."""
+
+    # Authentication
+    api_key = request.headers.get("X-API-KEY")
+
+    if not UPLOAD_API_KEY:
+        return {
+            "status": "error",
+            "message": "Upload authentication not configured"
+        }, 503
+
+    if api_key != UPLOAD_API_KEY:
+
+        print(
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"❌ Unauthorized upload attempt"
+        )
+
+        return {
+            "status": "error",
+            "message": "Unauthorized"
+        }, 401
 
     global session_image_count
     global last_detection_id
@@ -688,7 +711,7 @@ def signal_handler(signum, frame):
     global shutdown_flag
 
     print(
-	f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
         f"🛑 Shutting down recorder for {CAM_NAME}..."
     )
 
@@ -757,4 +780,3 @@ if __name__ == "__main__":
     )
 
     recording_loop()
-
