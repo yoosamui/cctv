@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.23.2
+# CCTV IMAGE DETECTOR - VERSION 3.23.3
 # ==============================================================================
 #
 # IMPROVEMENTS in v3.23.2:
@@ -81,12 +81,12 @@ logging.getLogger('werkzeug').setLevel(logging.CRITICAL)
 logging.getLogger('requests').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 
-VERSION = "3.23.2"
+VERSION = "3.23.3"
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
-ANALYSIS_INTERVAL = 5
+ANALYSIS_INTERVAL = 3
 MAX_IMAGES = 6
 COOLDOWN = 4.0
 CAM_THREAD_SLEEP = 0.01
@@ -263,61 +263,150 @@ def start_webhook_server():
     threading.Thread(target=lambda: app.run(host='0.0.0.0', port=WEBHOOK_PORT, debug=False, use_reloader=False, threaded=True), daemon=True).start()
     print(f"🌐 Webhook server on port {WEBHOOK_PORT}")
 
+
 # ==========================================
 # UPLOAD FUNCTION WITH QUEUE BACKPRESSURE AND RETRY LOGIC
 # ==========================================
 def upload_task(camera_name, url, image_buffer, ts, current_count, max_images, detection_id):
     """Upload task submitted to thread pool with retry logic for 429 errors"""
+
     max_retries = UPLOAD_MAX_RETRIES
 
     # Check if this upload is from the current active session
     state = camera_states[camera_name]
+
     with state.lock:
+
         # If this upload's session ID doesn't match the current active session, reject it
         if state.active_session_id and detection_id != state.active_session_id:
-            print(f"[{ts}] 🚫 {camera_name}: Rejected stale upload from session {detection_id} (current: {state.active_session_id})")
+
+            print(
+                f"[{ts}] 🚫 {camera_name}: "
+                f"Rejected stale upload from session "
+                f"{detection_id} "
+                f"(current: {state.active_session_id})"
+            )
+
             return
 
     for attempt in range(max_retries):
+
         try:
-            files = {'image': (f"{camera_name}_{ts}.jpg", image_buffer, 'image/jpeg')}
+
+            files = {
+                'image': (
+                    f"{camera_name}_{ts}.jpg",
+                    image_buffer,
+                    'image/jpeg'
+                )
+            }
+
             data = {
                 'frame_num': current_count,
                 'total_frames': max_images,
                 'camera': camera_name,
                 'detection_id': detection_id
             }
-            response = requests.post(url, files=files, data=data, timeout=5)
+
+            # ==========================================
+            # AUTH HEADER FOR RECORDER
+            # ==========================================
+            headers = {
+                'X-API-KEY': WEBHOOK_SECRET
+            }
+
+            response = requests.post(
+                url,
+                files=files,
+                data=data,
+                headers=headers,
+                timeout=5
+            )
+
             response.raise_for_status()
 
             if current_count == max_images:
+
                 with state.lock:
+
                     if state.state == SessionState.ACTIVE:
                         state.state = SessionState.WAITING_RESET
                         state.last_waiting_start = time.time()
-                print(f"[{ts}] 🛑 {camera_name}: Last frame sent ({current_count}/{max_images})")
+
+                print(
+                    f"[{ts}] 🛑 {camera_name}: "
+                    f"Last frame sent "
+                    f"({current_count}/{max_images})"
+                )
+
             return  # Success, exit function
 
         except requests.exceptions.HTTPError as e:
+
             if e.response.status_code == 429 and attempt < max_retries - 1:
+
                 # Recorder busy - exponential backoff
-                wait_time = UPLOAD_RETRY_DELAY_BASE * (attempt + 1)  # 2, 4, 6 seconds
-                print(f"[{ts}] ⚠️ {camera_name}: Recorder busy (429), retrying in {wait_time}s... (attempt {attempt+1}/{max_retries})")
+                wait_time = UPLOAD_RETRY_DELAY_BASE * (attempt + 1)
+
+                print(
+                    f"[{ts}] ⚠️ {camera_name}: "
+                    f"Recorder busy (429), retrying in "
+                    f"{wait_time}s... "
+                    f"(attempt {attempt+1}/{max_retries})"
+                )
+
                 time.sleep(wait_time)
+
             elif e.response.status_code == 503 and attempt < max_retries - 1:
+
                 # Service unavailable - shorter wait
-                print(f"[{ts}] ⚠️ {camera_name}: Recorder unavailable (503), retrying in 1s... (attempt {attempt+1}/{max_retries})")
+                print(
+                    f"[{ts}] ⚠️ {camera_name}: "
+                    f"Recorder unavailable (503), retrying in 1s... "
+                    f"(attempt {attempt+1}/{max_retries})"
+                )
+
                 time.sleep(1)
-            else:
-                print(f"[{ts}] ✗ {camera_name}: Upload failed - {e}")
+
+            elif e.response.status_code == 401:
+
+                print(
+                    f"[{ts}] ❌ {camera_name}: "
+                    f"Unauthorized upload (401). "
+                    f"Check WEBHOOK_SECRET."
+                )
+
                 break
-        except Exception as e:
-            if attempt < max_retries - 1:
-                wait_time = UPLOAD_RETRY_DELAY_BASE
-                print(f"[{ts}] ⚠️ {camera_name}: Upload error, retrying in {wait_time}s... (attempt {attempt+1}/{max_retries})")
-                time.sleep(wait_time)
+
             else:
-                print(f"[{ts}] ✗ {camera_name}: Upload failed after {max_retries} attempts - {e}")
+
+                print(f"[{ts}] ✗ {camera_name}: Upload failed - {e}")
+
+                break
+
+        except Exception as e:
+
+            if attempt < max_retries - 1:
+
+                wait_time = UPLOAD_RETRY_DELAY_BASE
+
+                print(
+                    f"[{ts}] ⚠️ {camera_name}: "
+                    f"Upload error, retrying in "
+                    f"{wait_time}s... "
+                    f"(attempt {attempt+1}/{max_retries})"
+                )
+
+                time.sleep(wait_time)
+
+            else:
+
+                print(
+                    f"[{ts}] ✗ {camera_name}: "
+                    f"Upload failed after "
+                    f"{max_retries} attempts - {e}"
+                )
+
                 break
 
 
