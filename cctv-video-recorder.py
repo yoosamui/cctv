@@ -1,7 +1,10 @@
+# Full CCTV Recorder Code v1.8.4
+
+
 """
 CCTV Recorder with Person Detection
 ====================================
-Version: 1.8.3 - Optimized Single Reset Logic
+Version: 1.8.4 - Critical Stability Fixes
 """
 
 import subprocess
@@ -20,7 +23,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-VERSION = "1.8.3"
+VERSION = "1.8.4"
 
 # ================= CONFIGURATION LOADING =================
 config = configparser.ConfigParser()
@@ -29,14 +32,21 @@ config_file = os.path.join(os.path.dirname(__file__), 'config.ini')
 
 def load_config():
     """Reads settings from config.ini with fallback defaults."""
+
     if not os.path.exists(config_file):
-        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ERROR: {config_file} not found!")
+
+        print(
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"ERROR: {config_file} not found!"
+        )
+
         sys.exit(1)
 
     config.read(config_file)
 
 
 load_config()
+
 print(" * Configuration loaded successfully.")
 
 BASE_DIR = config.get(
@@ -82,28 +92,39 @@ credentials_file = "/etc/cctv/credentials.env"
 WEBHOOK_SECRET = None
 
 if os.path.exists(credentials_file):
+
     try:
+
         load_dotenv(credentials_file)
 
         WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 
         if not WEBHOOK_SECRET:
-            print(f"WARNING: WEBHOOK_SECRET not found in {credentials_file}")
+
+            print(
+                f"WARNING: WEBHOOK_SECRET not found in "
+                f"{credentials_file}"
+            )
+
             print("Authentication to detector will fail!")
 
         else:
             print(" * Webhook secret loaded successfully")
 
     except Exception as e:
+
         print(f"ERROR loading credentials: {e}")
 
 else:
+
     print(f"WARNING: Credentials file not found: {credentials_file}")
+
     print(
         "Please run: sudo mkdir -p /etc/cctv && "
         "sudo tee /etc/cctv/credentials.env <<< "
         "'WEBHOOK_SECRET=\"your-secret\"'"
     )
+
     print("Authentication to detector will fail!")
 
 # Detector webhook URL
@@ -116,17 +137,25 @@ URL = None
 session_image_count = 0
 last_detection_id = None
 current_video_prefix = ""
+last_detection_time = 0
 
 prefix_lock = Lock()
 
 shutdown_flag = False
 
+SESSION_STALE_TIMEOUT = 300
+
 move_executor = ThreadPoolExecutor(max_workers=4)
+
+ffmpeg_process = None
 
 # Create necessary directories
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 app = Flask(__name__)
+
+# upload limit
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
 
 # Silence Flask logs
 log = logging.getLogger('werkzeug')
@@ -154,10 +183,12 @@ def send_reset_to_detector():
     """Send reset signal to detector."""
 
     if not WEBHOOK_SECRET:
+
         print(
             f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
             f"❌ Cannot send reset: No WEBHOOK_SECRET configured"
         )
+
         return False
 
     headers = {
@@ -174,6 +205,7 @@ def send_reset_to_detector():
     for attempt in range(max_retries):
 
         try:
+
             response = requests.post(
                 DETECTOR_WEBHOOK_URL,
                 json=payload,
@@ -248,14 +280,21 @@ def upload_image():
 
     global session_image_count
     global last_detection_id
+    global last_detection_time
+
+    if 'image' not in request.files:
+        return {
+            "status": "error",
+            "message": "No image part"
+        }, 400
 
     detection_id = request.form.get('detection_id', None)
-
-    frame_num = int(request.form.get('frame_num', 0))
 
     total_frames = int(request.form.get('total_frames', 6))
 
     camera_name = request.form.get('camera', CAM_NAME)
+
+    file = request.files['image']
 
     with prefix_lock:
 
@@ -265,7 +304,22 @@ def upload_image():
                 "message": "Recording not started yet"
             }, 503
 
-        # New session detected
+        # stale session recovery
+        if (
+            last_detection_time > 0
+            and
+            time.time() - last_detection_time > SESSION_STALE_TIMEOUT
+        ):
+
+            print(
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                f"⚠️ Stale detection session reset for {camera_name}"
+            )
+
+            session_image_count = 0
+            last_detection_id = None
+
+        # new session
         if detection_id and detection_id != last_detection_id:
 
             last_detection_id = detection_id
@@ -277,7 +331,6 @@ def upload_image():
                 f"{detection_id} for {camera_name}"
             )
 
-        # Session limit reached
         if session_image_count >= MAX_IMAGES_PER_SESSION:
 
             print(
@@ -292,23 +345,13 @@ def upload_image():
                 "session_count": session_image_count
             }, 429
 
-        session_image_count += 1
-        current_count = session_image_count
-
-        # copy safely while locked
         current_prefix = current_video_prefix
-
-    if 'image' not in request.files:
-        return {
-            "status": "error",
-            "message": "No image part"
-        }, 400
-
-    file = request.files['image']
 
     target_dir = get_camera_dir()
 
-    actual_time = datetime.now().strftime("%Y-%m-%d %H-%M-%S-%f")[:-3]
+    actual_time = datetime.now().strftime(
+        "%Y-%m-%d_%H-%M-%S-%f"
+    )[:-3]
 
     detection_tag = f"_{detection_id}" if detection_id else ""
 
@@ -322,6 +365,11 @@ def upload_image():
     try:
 
         file.save(save_path)
+
+        with prefix_lock:
+            session_image_count += 1
+            current_count = session_image_count
+            last_detection_time = time.time()
 
         print(
             f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
@@ -462,15 +510,47 @@ def move_to_share_background(local_path, filename):
         )
 
 
+# ================= FFMPEG PROCESS MANAGEMENT =================
 def kill_ffmpeg():
-    """Kill any running ffmpeg processes for this camera."""
+    """Safely terminate active ffmpeg process."""
 
-    if CAM_NAME:
+    global ffmpeg_process
 
-        subprocess.run(
-            ["pkill", "-9", "-f", f"ffmpeg.*{CAM_NAME}"],
-            stderr=subprocess.DEVNULL
+    if ffmpeg_process is None:
+        return
+
+    try:
+
+        if ffmpeg_process.poll() is None:
+
+            print(
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                f"🛑 Stopping ffmpeg process for {CAM_NAME}"
+            )
+
+            ffmpeg_process.terminate()
+
+            try:
+                ffmpeg_process.wait(timeout=10)
+
+            except subprocess.TimeoutExpired:
+
+                print(
+                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                    f"⚠️ ffmpeg did not terminate gracefully, killing"
+                )
+
+                ffmpeg_process.kill()
+
+    except Exception as e:
+
+        print(
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"❌ Error stopping ffmpeg: {e}"
         )
+
+    finally:
+        ffmpeg_process = None
 
 
 # ================= RECORDING LOOP =================
@@ -479,6 +559,7 @@ def recording_loop():
 
     global current_video_prefix
     global shutdown_flag
+    global ffmpeg_process
 
     print(
         f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
@@ -508,28 +589,20 @@ def recording_loop():
             "-hide_banner",
             "-loglevel",
             "error",
-
             "-rtsp_transport",
             "tcp",
-
             "-stimeout",
             "5000000",
-
             "-i",
             URL,
-
             "-c:v",
             "copy",
-
             "-map",
             "0:v:0",
-
             "-t",
             str(SEGMENT_DURATION),
-
             "-reset_timestamps",
             "1",
-
             local_path
         ]
 
@@ -541,11 +614,32 @@ def recording_loop():
                 flush=True
             )
 
-            subprocess.run(
-                cmd,
-                check=True,
-                timeout=SEGMENT_DURATION + 30
-            )
+            ffmpeg_process = subprocess.Popen(cmd)
+
+            try:
+
+                ffmpeg_process.wait(
+                    timeout=SEGMENT_DURATION + 30
+                )
+
+            except subprocess.TimeoutExpired:
+
+                print(
+                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                    f"⏰ ffmpeg timeout for {CAM_NAME}"
+                )
+
+                kill_ffmpeg()
+                continue
+
+            if ffmpeg_process.returncode != 0:
+
+                raise subprocess.CalledProcessError(
+                    ffmpeg_process.returncode,
+                    cmd
+                )
+
+            ffmpeg_process = None
 
             if (
                 os.path.exists(local_path)
@@ -559,13 +653,6 @@ def recording_loop():
                     filename
                 )
 
-        except subprocess.TimeoutExpired:
-
-            print(
-                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                f"⏰ Recording timeout for {CAM_NAME}"
-            )
-
         except subprocess.CalledProcessError as e:
 
             print(
@@ -573,6 +660,10 @@ def recording_loop():
                 f"❌ FFmpeg failed with code "
                 f"{e.returncode}: {e}"
             )
+
+            ffmpeg_process = None
+
+            time.sleep(5)
 
         except Exception as e:
 
@@ -585,6 +676,8 @@ def recording_loop():
             import traceback
             traceback.print_exc()
 
+            ffmpeg_process = None
+
             time.sleep(5)
 
 
@@ -595,7 +688,7 @@ def signal_handler(signum, frame):
     global shutdown_flag
 
     print(
-        f"\n[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+	f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
         f"🛑 Shutting down recorder for {CAM_NAME}..."
     )
 
@@ -603,7 +696,7 @@ def signal_handler(signum, frame):
 
     kill_ffmpeg()
 
-    move_executor.shutdown(wait=False)
+    move_executor.shutdown(wait=True)
 
     sys.exit(0)
 
@@ -646,11 +739,9 @@ if __name__ == "__main__":
     print(f"Webhook configured: {WEBHOOK_SECRET is not None}")
     print("=" * 60)
 
-    # Setup signal handlers
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
-    # Start Flask server in background
     server_thread = Thread(
         target=run_flask,
         daemon=True
@@ -658,7 +749,6 @@ if __name__ == "__main__":
 
     server_thread.start()
 
-    # Give Flask time to start
     time.sleep(2)
 
     print(
@@ -666,5 +756,5 @@ if __name__ == "__main__":
         f"✅ Recorder ready for {CAM_NAME}"
     )
 
-    # Start recording loop
     recording_loop()
+
