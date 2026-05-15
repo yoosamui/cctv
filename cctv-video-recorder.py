@@ -1,9 +1,9 @@
-# Full CCTV Recorder Code v1.8.5
+# Full CCTV Recorder Code v1.8.6
 
 """
 CCTV Recorder with Person Detection
 ====================================
-Version: 1.8.4 - Critical Stability Fixes
+Version: 1.8.6 - Improved Cleanup & Performance
 """
 
 import subprocess
@@ -14,7 +14,7 @@ import logging
 import argparse
 import configparser
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, request
 from threading import Thread, Lock
 import signal
@@ -22,7 +22,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-VERSION = "1.8.5"
+VERSION = "1.8.6"
 
 # ================= CONFIGURATION LOADING =================
 config = configparser.ConfigParser()
@@ -64,6 +64,12 @@ RETENTION_DAYS = config.getint(
     'STORAGE',
     'retention_days',
     fallback=7
+)
+
+CLEANUP_INTERVAL_HOURS = config.getint(
+    'STORAGE',
+    'cleanup_interval_hours',
+    fallback=6
 )
 
 SEGMENT_DURATION = config.getint(
@@ -576,6 +582,115 @@ def kill_ffmpeg():
         ffmpeg_process = None
 
 
+# ==========================================
+# FILE RETENTION CLEANUP (IMPROVED)
+# ==========================================
+def cleanup_old_recordings():
+    """Delete recordings older than RETENTION_DAYS."""
+    
+    try:
+        if not os.path.exists(BASE_DIR):
+            return
+
+        now = time.time()
+        retention_seconds = RETENTION_DAYS * 86400
+        
+        deleted_folders = 0
+        freed_space = 0
+        
+        print(
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"🧹 Starting cleanup (retention: {RETENTION_DAYS} days)"
+        )
+        
+        # Walk through date folders in BASE_DIR
+        for date_folder in os.listdir(BASE_DIR):
+            date_path = os.path.join(BASE_DIR, date_folder)
+            
+            # Check if it's a directory
+            if not os.path.isdir(date_path):
+                continue
+                
+            # Parse date from folder name (format: YYYY-MM-DD)
+            try:
+                folder_date = datetime.strptime(date_folder, "%Y-%m-%d")
+                folder_timestamp = folder_date.timestamp()
+                
+                # If folder is older than retention period
+                if (now - folder_timestamp) > retention_seconds:
+                    
+                    # Calculate folder size before deletion
+                    folder_size = 0
+                    for dirpath, dirnames, filenames in os.walk(date_path):
+                        for filename in filenames:
+                            filepath = os.path.join(dirpath, filename)
+                            try:
+                                folder_size += os.path.getsize(filepath)
+                            except (OSError, IOError):
+                                pass
+                    
+                    # Delete entire folder
+                    shutil.rmtree(date_path)
+                    
+                    deleted_folders += 1
+                    freed_space += folder_size
+                    
+                    print(
+                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                        f"🗑️ Deleted old date folder: {date_folder} "
+                        f"({folder_size / (1024**3):.2f} GB)"
+                    )
+                    
+            except ValueError:
+                # Not a date folder, skip (could be legacy structure)
+                # For legacy structure, clean files individually
+                try:
+                    for camera_folder in os.listdir(date_path):
+                        camera_path = os.path.join(date_path, camera_folder)
+                        if os.path.isdir(camera_path):
+                            for file in os.listdir(camera_path):
+                                file_path = os.path.join(camera_path, file)
+                                try:
+                                    file_age = now - os.path.getmtime(file_path)
+                                    if file_age > retention_seconds:
+                                        os.remove(file_path)
+                                        print(
+                                            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                                            f"🗑️ Deleted old file: {file_path}"
+                                        )
+                                except Exception:
+                                    pass
+                except Exception:
+                    pass
+                
+        print(
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"✅ Cleanup complete "
+            f"(folders deleted: {deleted_folders}, "
+            f"freed: {freed_space / (1024**3):.2f} GB)"
+        )
+        
+    except Exception as e:
+        print(
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"❌ Cleanup failed: {e}"
+        )
+
+
+def cleanup_worker():
+    """Background thread that runs cleanup on a schedule."""
+    
+    # Run cleanup immediately on startup
+    cleanup_old_recordings()
+    
+    # Then run at configured interval
+    while not shutdown_flag:
+        time.sleep(CLEANUP_INTERVAL_HOURS * 3600)
+        
+        if not shutdown_flag:
+            cleanup_old_recordings()
+
+
 # ================= RECORDING LOOP =================
 def recording_loop():
     """Main recording loop."""
@@ -587,6 +702,19 @@ def recording_loop():
     print(
         f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
         f"🔄 RECORDING LOOP STARTED for {CAM_NAME}",
+        flush=True
+    )
+    
+    # Start cleanup thread
+    cleanup_thread = Thread(
+        target=cleanup_worker,
+        daemon=True
+    )
+    cleanup_thread.start()
+    
+    print(
+        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+        f"🧹 Cleanup thread started (interval: {CLEANUP_INTERVAL_HOURS} hours)",
         flush=True
     )
 
@@ -675,6 +803,8 @@ def recording_loop():
                     local_path,
                     filename
                 )
+                
+                # REMOVED: cleanup_old_recordings() from here - now runs in background thread
 
         except subprocess.CalledProcessError as e:
 
@@ -759,6 +889,8 @@ if __name__ == "__main__":
     print(f"Flask port: {FLASK_PORT}")
     print(f"Max images per session: {MAX_IMAGES_PER_SESSION}")
     print(f"Segment duration: {SEGMENT_DURATION}s")
+    print(f"Retention: {RETENTION_DAYS} days")
+    print(f"Cleanup interval: {CLEANUP_INTERVAL_HOURS} hours")
     print(f"Webhook configured: {WEBHOOK_SECRET is not None}")
     print("=" * 60)
 

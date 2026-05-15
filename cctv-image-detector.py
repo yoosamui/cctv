@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.23.3
+# CCTV IMAGE DETECTOR - VERSION 3.23.4
 # ==============================================================================
 #
 # IMPROVEMENTS in v3.23.2:
@@ -81,34 +81,141 @@ logging.getLogger('werkzeug').setLevel(logging.CRITICAL)
 logging.getLogger('requests').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 
-VERSION = "3.23.3"
+VERSION = "3.23.4"
 
 # ==========================================
 # CONFIGURATION
 # ==========================================
-ANALYSIS_INTERVAL = 3
+
+# How often each camera is analyzed by YOLO (seconds)
+# Lower = faster detection but higher CPU usage
+# Higher = lower CPU usage but slower detection response
+ANALYSIS_INTERVAL = 4
+
+# Maximum images uploaded per detection session
+# Example:
+# Person detected -> send max 6 images -> wait for recorder reset
 MAX_IMAGES = 6
+
+# Minimum time between starting new detection sessions (seconds)
+# Prevents repeated triggering from same person standing still
 COOLDOWN = 4.0
+
+# Small sleep inside camera capture thread
+# Prevents CPU spinning at 100%
+# Lower = more responsive frame grabbing but higher CPU
 CAM_THREAD_SLEEP = 0.01
-YOLO_CONFIDENCE = 0.35  # after test set his 0.55
-YOLO_INPUT_SIZE = 480   # What YOLO sees (for detection speed/accuracy)
-YOLO_IOU = 0.45         # IoU threshold for NMS. only helps with: Duplicate boxes around the same object, Overlapping detections.
+
+# Minimum confidence required for YOLO person detection
+# Lower values:
+#   + detect more people
+#   - more false positives
+#
+# Higher values:
+#   + fewer false detections
+#   - may miss distant/small persons
+#
+# Recommended:
+#   0.35 = testing / high sensitivity
+#   0.50-0.60 = production
+YOLO_CONFIDENCE = 0.35
+
+# YOLO input image size
+# Larger:
+#   + better accuracy
+#   - higher CPU usage
+#
+# Smaller:
+#   + faster inference
+#   - lower detection accuracy
+#
+# Good balance for Raspberry Pi 5:
+#   416
+#
+# Recommended:
+#   320 = very fast
+#   416 = balanced
+#   480 = better accuracy
+#   640 = heavy CPU usage
+YOLO_INPUT_SIZE = 416
+
+# Intersection-over-Union threshold for Non-Maximum Suppression (NMS)
+# Helps remove duplicate overlapping boxes
+#
+# Lower:
+#   + removes duplicates aggressively
+#   - may remove valid nearby detections
+#
+# Higher:
+#   + keeps more boxes
+#   - more duplicate boxes possible
+YOLO_IOU = 0.45
+
+# JPEG quality for uploaded images
+# Higher:
+#   + better image quality
+#   - larger files / more network traffic
+#
+# Lower:
+#   + smaller uploads
+#   - reduced image quality
 JPEG_QUALITY = 80
+
+# Flask webhook port for reset communication
 WEBHOOK_PORT = 5001
+
+# Reset incomplete ACTIVE sessions after no activity (seconds)
+# Prevents stuck sessions forever
 SESSION_TIMEOUT = 600
-WATCHDOG_TIMEOUT = 300  # Changed from 600 to 300 seconds for faster recovery
+
+# Maximum time waiting for recorder reset before force reset
+# Protects against recorder crashes or network failures
+WATCHDOG_TIMEOUT = 150
+
+# How often watchdog checks session health (seconds)
 WATCHDOG_CHECK = 10
-POST_RESET_COOLDOWN = 6  # Increased from 3 to 6 seconds to prevent recorder rejects
+
+# Cooldown after recorder reset before allowing new detections
+# Prevents stale frames and duplicate sessions
+POST_RESET_COOLDOWN = 6
+
+# Ignore duplicate reset signals inside this time window
+# Prevents double reset processing
 RESET_DEDUP_WINDOW = 2
 
-# Thread pool settings
+
+# ==========================================
+# THREAD POOL SETTINGS
+# ==========================================
+
+# Parallel upload worker threads
+# More workers:
+#   + faster uploads
+#   - higher CPU/RAM/network usage
 UPLOAD_WORKERS = 4
+
+# Maximum pending uploads before dropping frames
+# Prevents unlimited RAM growth during overload
 UPLOAD_QUEUE_SIZE = 20
+
+# Delay before restarting crashed YOLO worker (seconds)
 YOLO_RESTART_DELAY = 5
 
-# Upload retry settings
+
+# ==========================================
+# UPLOAD RETRY SETTINGS
+# ==========================================
+
+# Maximum upload retry attempts
+# Helps survive temporary network failures
 UPLOAD_MAX_RETRIES = 3
-UPLOAD_RETRY_DELAY_BASE = 2  # Base delay in seconds
+
+# Base retry delay in seconds
+# Used for exponential backoff:
+# attempt 1 -> 2s
+# attempt 2 -> 4s
+# attempt 3 -> 6s
+UPLOAD_RETRY_DELAY_BASE = 2
 
 # ==========================================
 # SESSION STATE ENUM
