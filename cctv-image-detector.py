@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.23.1
+# CCTV IMAGE DETECTOR - VERSION 3.23.2
 # ==============================================================================
+#
+# IMPROVEMENTS in v3.23.2:
+#   1. Increased POST_RESET_COOLDOWN from 3s to 6s to prevent recorder rejects
+#   2. Added session validation to reject stale uploads from previous sessions
+#   3. Prevent new detections during cooldown period after reset
+#   4. Fixed race condition where old session frames would be accepted after reset
 #
 # IMPROVEMENTS in v3.23.1:
 #   1. Added 429 error handling with exponential backoff
@@ -46,7 +52,7 @@
 #   python3 cctv_image_detector.py
 #
 # AUTHOR: yoosamui
-# DATE: 2026-05-13
+# DATE: 2026-05-15
 # ==============================================================================
 
 import cv2
@@ -75,7 +81,7 @@ logging.getLogger('werkzeug').setLevel(logging.CRITICAL)
 logging.getLogger('requests').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 
-VERSION = "3.23.1"
+VERSION = "3.23.2"
 
 # ==========================================
 # CONFIGURATION
@@ -84,15 +90,15 @@ ANALYSIS_INTERVAL = 5
 MAX_IMAGES = 6
 COOLDOWN = 4.0
 CAM_THREAD_SLEEP = 0.01
-YOLO_CONFIDENCE = 0.55
-YOLO_INPUT_SIZE = 480  # What YOLO sees (for detection speed/accuracy)
-YOLO_IOU = 0.45        #  IoU threshold for NMS.  only helps with:  Duplicate boxes around the same object, Overlapping detections.
+YOLO_CONFIDENCE = 0.35  # after test set his 0.55
+YOLO_INPUT_SIZE = 480   # What YOLO sees (for detection speed/accuracy)
+YOLO_IOU = 0.45         # IoU threshold for NMS. only helps with: Duplicate boxes around the same object, Overlapping detections.
 JPEG_QUALITY = 80
 WEBHOOK_PORT = 5001
 SESSION_TIMEOUT = 600
-WATCHDOG_TIMEOUT = 120  # Changed from 600 to 120 seconds for faster recovery
+WATCHDOG_TIMEOUT = 300  # Changed from 600 to 300 seconds for faster recovery
 WATCHDOG_CHECK = 10
-POST_RESET_COOLDOWN = 3
+POST_RESET_COOLDOWN = 6  # Increased from 3 to 6 seconds to prevent recorder rejects
 RESET_DEDUP_WINDOW = 2
 
 # Thread pool settings
@@ -155,6 +161,7 @@ class CameraState:
         self.last_waiting_start = 0
         self.last_reset_time = 0
         self.last_reset_processed = 0
+        self.active_session_id = None  # Track current active session ID
 
 camera_states = {n: CameraState() for n in NODES}
 
@@ -204,6 +211,7 @@ def session_reset():
             state.last_reset_processed = now
             was_waiting = (state.state == SessionState.WAITING_RESET)
             old_count = state.count
+            old_session_id = state.active_session_id
 
             # Clear session state
             state.state = SessionState.COMPLETED
@@ -211,6 +219,7 @@ def session_reset():
             state.detection_id = None
             state.last_waiting_start = 0
             state.last_reset_time = now
+            state.active_session_id = None  # Clear active session ID on reset
 
             if was_waiting:
                 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - DETECTION RESUMED")
@@ -236,7 +245,8 @@ def health_check():
             camera_stats[name] = {
                 "state": state.state.name,
                 "count": state.count,
-                "detection_id": state.detection_id
+                "detection_id": state.detection_id,
+                "active_session_id": state.active_session_id
             }
 
     return jsonify({
@@ -260,6 +270,14 @@ def upload_task(camera_name, url, image_buffer, ts, current_count, max_images, d
     """Upload task submitted to thread pool with retry logic for 429 errors"""
     max_retries = UPLOAD_MAX_RETRIES
 
+    # Check if this upload is from the current active session
+    state = camera_states[camera_name]
+    with state.lock:
+        # If this upload's session ID doesn't match the current active session, reject it
+        if state.active_session_id and detection_id != state.active_session_id:
+            print(f"[{ts}] 🚫 {camera_name}: Rejected stale upload from session {detection_id} (current: {state.active_session_id})")
+            return
+
     for attempt in range(max_retries):
         try:
             files = {'image': (f"{camera_name}_{ts}.jpg", image_buffer, 'image/jpeg')}
@@ -273,7 +291,6 @@ def upload_task(camera_name, url, image_buffer, ts, current_count, max_images, d
             response.raise_for_status()
 
             if current_count == max_images:
-                state = camera_states[camera_name]
                 with state.lock:
                     if state.state == SessionState.ACTIVE:
                         state.state = SessionState.WAITING_RESET
@@ -351,7 +368,7 @@ def yolo_worker_process(input_q, output_q):
                 frame,
                 imgsz=YOLO_INPUT_SIZE,
                 conf=YOLO_CONFIDENCE,
-                iou=YOLO_IOU,  # ← ADD THIS LINE
+                iou=YOLO_IOU,
                 classes=[0],
                 verbose=False
             )
@@ -478,6 +495,7 @@ def session_watchdog():
                         state.count = 0
                         state.detection_id = None
                         state.last_waiting_start = 0
+                        state.active_session_id = None
 
                 # Check for idle ACTIVE sessions
                 elif state.state == SessionState.ACTIVE and state.count > 0:
@@ -487,6 +505,7 @@ def session_watchdog():
                         state.state = SessionState.IDLE
                         state.count = 0
                         state.detection_id = None
+                        state.active_session_id = None
 
 # ==========================================
 # MAIN
@@ -514,16 +533,13 @@ if __name__ == "__main__":
     print(f"YOLO_AUTO_RESTART: Enabled")
     print(f"YOLO_CONFIDENCE: {YOLO_CONFIDENCE}")
     print(f"YOLO_INPUT_SIZE: {YOLO_INPUT_SIZE}")
-    print(f"YOLO_IOU: {YOLO_IOU}")  # ← ADD THIS LINE
-    print(f"YOLO_INPUT_SIZE: {YOLO_INPUT_SIZE}")
+    print(f"YOLO_IOU: {YOLO_IOU}")
     print(f"WEBHOOK_PORT: {WEBHOOK_PORT}")
     print(f"SESSION_TIMEOUT: {SESSION_TIMEOUT}s (idle sessions)")
     print(f"WATCHDOG: {WATCHDOG_CHECK}s check interval, {WATCHDOG_TIMEOUT}s timeout for stuck sessions")
     print(f"POST_RESET_COOLDOWN: {POST_RESET_COOLDOWN}s (cooldown after reset)")
     print(f"RESET_DEDUP_WINDOW: {RESET_DEDUP_WINDOW}s (ignore duplicate resets)")
     print("=" * 60)
-
-
 
     threading.Thread(target=session_watchdog, daemon=True).start()
 
@@ -540,6 +556,7 @@ if __name__ == "__main__":
 
                 if detections:
                     with state.lock:
+                        # Check cooldown period after reset
                         cooldown_remaining = POST_RESET_COOLDOWN - (now - state.last_reset_time) if state.last_reset_time > 0 else 0
 
                         if cooldown_remaining > 0:
@@ -550,6 +567,7 @@ if __name__ == "__main__":
                             state.state = SessionState.ACTIVE
                             state.count = 0
                             state.detection_id = None
+                            state.active_session_id = None
 
                         # Only process if active and not waiting
                         if state.state == SessionState.ACTIVE and state.count < MAX_IMAGES:
@@ -558,6 +576,7 @@ if __name__ == "__main__":
 
                             if state.count == 0:
                                 state.detection_id = str(uuid.uuid4())[:8]
+                                state.active_session_id = state.detection_id  # Track current session ID
                                 print(f"[{ts}] 🆔 {name}: New detection session {state.detection_id}")
 
                             state.count += 1
