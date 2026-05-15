@@ -1,46 +1,66 @@
-# cctv
-cctv recorder (RPI) and yolo person detection 
-## Project Overview: The "Samui-Cyber" NVR
-This project is a custom-built, lightweight Network Video Recorder (NVR) designed to handle high-definition surveillance with minimal overhead. Instead of relying on a bulky, closed-source NVR box, we’ve distributed the workload across your local network for maximum efficiency and security.
+### CCTV for RPI with person detection
 
-### How It’s Built (Architecture)
-The system is divided into three distinct layers to ensure that even if one part fails, your footage remains safe:
+<img width="638" height="497" alt="image" src="https://github.com/user-attachments/assets/33b99e49-9491-4b3e-bcb6-feb295ab96bf" />
 
-*   **The Source (Hikvision):** High-resolution Hikvision cameras provide the raw video data via RTSP (Real Time Streaming Protocol).
-*   **The Engine (Raspberry Pi):** A Raspberry Pi acts as the "Brains." It runs a continuous **Bash script** that uses **FFmpeg** to pull the RTSP stream, segmenting it into 5-minute `.mp4` chunks.
-*   **The Storage (NAS/Share):** The Pi doesn't keep the files locally; it automatically moves them to a network share organized by **Year/Month/Date**.
-*   **The Archive (Logic):** A secondary script manages the storage by archiving older folders and deleting data once it reaches a certain age to prevent the drive from filling up.
+### What it does
+This is a multi-camera person-detection system. Six IP cameras feed RTSP streams into a Raspberry Pi 5 running YOLOv8. When a person is detected, it uploads up to 6 annotated JPEG frames to one of 6 dedicated Raspberry Pi 4B recorders. Each recorder saves the images and sends an HTTP reset signal back when done, allowing the detector to start a new session.
 
----
+### Architecture & threading model
+The system has several concurrent layers:
 
-### Installation & Setup Guide
+CameraStream — one thread per camera, continuously reads frames from RTSP via OpenCV/FFmpeg, auto-reconnects on failure. Thread-safe via a lock; callers get a .copy() of the latest frame.
+Main loop — polls each camera every ANALYSIS_INTERVAL (4s), feeds a bounded multiprocessing queue (maxsize=10).
+YOLO worker — a separate process (not thread) to bypass Python's GIL for CPU-intensive inference. Runs YOLOv8n ONNX and puts results onto a result queue.
+handle_results — a thread consuming detections, managing session state, and dispatching uploads.
+ThreadPoolExecutor (4 workers, queue cap 20) — handles async HTTP uploads with retry/backoff.
+Flask webhook server — a daemon thread receiving reset signals and health check pings.
+Session watchdog — a thread detecting stuck sessions and force-resetting them.
 
-#### 1. Hardware Preparation
-*   **Camera:** Ensure your Hikvision camera is on a static IP (e.g., `192.168.1.99`).
-*   **Pi:** Use a Raspberry Pi (v3 or v4) running **Debian/Raspberry Pi OS**.
-*   **Network:** Connect both to your local network via Ethernet for the best stability.
 
-#### 2. The Recording Script
-The core of the project is the `capture.sh` script. It uses the following logic:
-```bash
-# Example FFmpeg command used in our project
-ffmpeg -i "rtsp://user:pass@IP:554/Streaming/channels/101" \
--c copy -map 0 -f segment -segment_time 300 \
--reset_timestamps 1 -strftime 1 "Gate_%Y-%m-%d_%H-%M-%S.mp4"
-```
-*   **-c copy:** This is critical; it tells the Pi to just "copy" the video stream without re-encoding it, which keeps the Pi's CPU usage extremely low.
+### Session state machine
+Each camera has its own independent CameraState with a proper enum: IDLE → ACTIVE → WAITING_RESET → COMPLETED → IDLE. This is a solid design choice — it replaces what was previously a tangle of boolean flags (as noted in the v3.22.1 changelog). The lock on each state object ensures thread safety.
+A few key protections:
 
-#### 3. Organizing the Data
-We use a **Cron Job** to run the archival script every night at midnight. This script:
-1.  Creates a new directory for the current date (e.g., `2026-05-05`).
-2.  Moves the previous day's `.mp4` files into the appropriate archive folder.
+POST_RESET_COOLDOWN (6s after reset) — prevents stale frames from the old session triggering a new one immediately.
+active_session_id (UUID) — each upload checks its session ID still matches; old in-flight uploads from a previous session are silently dropped.
+RESET_DEDUP_WINDOW (2s) — ignores duplicate reset POSTs from the recorder.
+WATCHDOG_TIMEOUT (150s) — force-resets any session stuck in WAITING_RESET, protecting against recorder crashes.
 
-#### 4. Viewing the Footage
-Since the files are saved as standard `.mp4` files on a network share, you don't need proprietary software:
-*   **Live View:** Use VLC to open the RTSP stream directly.
-*   **Review:** Simply open the mapped network drive on your PC and play the 5-minute segments in any media player.
 
----
+### Upload resilience
+The upload_task function implements retry logic with exponential backoff: 3 attempts, base 2s delay. It handles HTTP 429 (recorder busy), 503 (unavailable), and 401 (auth failure) distinctly. The UPLOAD_QUEUE_SIZE cap prevents RAM growth under sustained load — excess frames are dropped and counted via dropped_uploads.
 
-### Maintenance
-Because you are a Network Engineer, you can monitor the health of the system using **Zabbix**. We have configured it to track the Pi's status and ensure the recording service is always active.
+### Overall assessment
+
+This is well-structured production code for an embedded system. The progression through versions shows clear, disciplined iteration — each version changelog reflects real lessons learned (race conditions, retry logic, watchdog tuning). The use of a SessionState enum, per-camera locking, session ID validation, and backpressure on the upload queue are all solid engineering choices for a concurrent, real-world deployment.
+
+### Recorder
+### What it does
+
+Each RPi 4B runs one instance of this script, pointed at one camera. It does two things simultaneously:
+
+Continuously records the RTSP stream into 5-minute MP4 segments via ffmpeg, moved to a network share when complete
+Receives JPEG detections from the detector via HTTP, saves them alongside the video, then signals back to the detector when the session is done
+
+### Architecture
+
+main thread        → recording_loop() — ffmpeg segments, forever
+daemon thread      → Flask :5000 — receives uploads + health/reset endpoints  
+daemon thread      → cleanup_worker() — deletes old recordings every 6h
+ThreadPoolExecutor → move_to_share_background() — moves MP4s + sends reset
+
+The reset signal to the detector is sent from move_to_share_background() — meaning the detector only gets unblocked after the MP4 segment finishes and is moved. This is an important design coupling to understand.
+
+### The upload flow
+
+When a detection image arrives at /upload:
+
+Authenticates via X-API-KEY header
+Checks if recording has started (current_video_prefix != "")
+Detects a new session when detection_id changes
+Enforces MAX_IMAGES_PER_SESSION (returns 429 if exceeded — which is what the detector's retry logic handles)
+Saves the JPEG directly to the final camera directory with a filename embedding the video prefix, detection ID, and timestamp
+Returns frame count to the detector
+
+### Installation
+-eof-
