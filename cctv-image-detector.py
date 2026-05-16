@@ -12,8 +12,58 @@
 #   2. Fixed CameraStream.stop() bug
 #
 # [Previous improvements remain...]
+#
+# IMPROVEMENTS in v3.23.2:
+#   1. Increased POST_RESET_COOLDOWN from 3s to 6s to prevent recorder rejects
+#   2. Added session validation to reject stale uploads from previous sessions
+#   3. Prevent new detections during cooldown period after reset
+#   4. Fixed race condition where old session frames would be accepted after reset
+#
+# IMPROVEMENTS in v3.23.1:
+#   1. Added 429 error handling with exponential backoff
+#   2. Increased retry delays for recorder busy states
+#   3. Better upload resilience
+#
+# IMPROVEMENTS in v3.23.0:
+#   1. Reduced WATCHDOG_TIMEOUT from 600s to 120s for faster recovery
+#   2. Increased YOLO_INPUT_SIZE from 320 to 480 for better accuracy
+#   3. Updated configuration comments for clarity
+#
+# IMPROVEMENTS in v3.22.1:
+#   1. Fixed upload queue with proper backpressure
+#   2. Thread-safe frame access with locks
+#   3. Session state enum instead of multiple booleans
+#   4. Proper YOLO process cleanup with join()
+#   5. Optimized frame handling (reduced copies)
+#
+# WHAT THIS DOES:
+#   Detects people in 6 CCTV camera streams using YOLOv8
+#   Sends annotated images to Raspberry Pi recorders
+#   Receives reset signals when recorders finish saving
+#
+# HOW IT WORKS:
+#   1. CameraStream threads capture frames from RTSP streams
+#   2. YOLO worker process detects people (parallel inference)
+#   3. When person detected -> upload 6 frames to RPi recorder
+#   4. After 6th frame -> wait for recorder to signal completion
+#   5. Recorder signals back via HTTP POST -> reset session
+#
+# ARCHITECTURE:
+#   [6 Cameras] -> [Detector RPI 5] -> [6 RPis 4B] -> [Save Images]
+#                      ↑                      │
+#                      └─── Reset Signal ─────┘
+#                      └───> send images ─────┘
+#
+#
+# DEPENDENCIES:
+#   pip install ultralytics opencv-python flask requests python-dotenv
+#
+# USAGE:
+#   python3 cctv_image_detector.py
+#
+# AUTHOR: yoosamui
+# DATE: 2026-05-15
 # ==============================================================================
-
 import cv2
 import multiprocessing
 import threading
@@ -31,6 +81,8 @@ from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 import logging
 
+VERSION = "3.23.6"
+
 # ==========================================
 # SILENCE LOGS
 # ==========================================
@@ -39,8 +91,6 @@ werkzeug_log.disabled = True
 logging.getLogger('werkzeug').setLevel(logging.CRITICAL)
 logging.getLogger('requests').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
-
-VERSION = "3.23.6"
 
 # ==========================================
 # CONFIGURATION
@@ -129,7 +179,7 @@ SESSION_TIMEOUT = 600
 
 # Maximum time waiting for recorder reset before force reset
 # Protects against recorder crashes or network failures
-WATCHDOG_TIMEOUT = 150
+WATCHDOG_TIMEOUT = 300
 
 # How often watchdog checks session health (seconds)
 WATCHDOG_CHECK = 10
