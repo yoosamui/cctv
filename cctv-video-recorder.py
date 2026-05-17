@@ -1,9 +1,9 @@
-# Full CCTV Recorder Code v1.8.7 - Async Session Reset
+# Full CCTV Recorder Code v1.8.6
 
 """
 CCTV Recorder with Person Detection
 ====================================
-Version: 1.8.7 - Async Session Reset (eliminates 10-second delay)
+Version: 1.8.6 - Improved Cleanup & Performance & security
 """
 
 import subprocess
@@ -22,7 +22,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-VERSION = "1.8.7"
+VERSION = "1.8.6"
 
 # ================= CONFIGURATION LOADING =================
 config = configparser.ConfigParser()
@@ -281,44 +281,6 @@ def send_reset_to_detector():
     return False
 
 
-# ================= ASYNC SESSION RESET (NEW) =================
-def async_session_reset():
-    """Background thread to reset session state asynchronously."""
-    global session_image_count
-    global last_detection_id
-    global last_detection_time
-    
-    # Brief delay to allow any in-flight uploads to complete
-    time.sleep(0.5)
-    
-    with prefix_lock:
-        old_count = session_image_count
-        old_id = last_detection_id
-        
-        session_image_count = 0
-        last_detection_id = None
-        last_detection_time = time.time()
-        
-        print(
-            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-            f"🔄 Async session reset for {CAM_NAME}: "
-            f"cleared {old_count} images (ID: {old_id})"
-        )
-    
-    # Now send reset signal to detector (outside the lock)
-    send_reset_to_detector()
-
-
-def queue_async_reset():
-    """Queue a session reset to happen in background."""
-    reset_thread = Thread(
-        target=async_session_reset,
-        daemon=True
-    )
-    reset_thread.start()
-    return reset_thread
-
-
 # ================= FLASK ENDPOINTS =================
 @app.route("/upload", methods=["POST"])
 def upload_image():
@@ -454,10 +416,6 @@ def upload_image():
                 f"{detection_id} complete "
                 f"({total_frames}/{total_frames})"
             )
-            
-            # QUEUE ASYNC RESET - this will call send_reset_to_detector()
-            # from inside the background thread (non-blocking)
-            queue_async_reset()
 
         return {
             "status": "success",
@@ -537,20 +495,6 @@ def status():
         }, 200
 
 
-@app.route("/ready", methods=["GET"])
-def ready_check():
-    """Quick check if recorder is ready to accept uploads."""
-    with prefix_lock:
-        is_ready = (session_image_count < MAX_IMAGES_PER_SESSION)
-        
-        return {
-            "ready": is_ready,
-            "current_count": session_image_count,
-            "max": MAX_IMAGES_PER_SESSION,
-            "camera": CAM_NAME
-        }, 200
-
-
 def run_flask():
     """Start Flask server."""
 
@@ -564,37 +508,22 @@ def run_flask():
 
 
 # ================= FILE MANAGEMENT =================
+
 def move_to_share_background(local_path, filename):
-    """Move file to final location."""
-    # NOTE: Reset is now triggered from upload_image() when session completes
-    # No reset signal sent from here anymore
-
+    """Move file to final location and trigger detector reset."""
     try:
-
         final_dir = get_camera_dir()
-
         final_path = os.path.join(final_dir, filename)
 
         if os.path.exists(local_path):
-
             shutil.move(local_path, final_path)
+            print(f"📁 File moved to share: {filename}", flush=True)
 
-            print(
-                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                f"📁 File moved to share: {filename}",
-                flush=True
-            )
-
-            # REMOVED: send_reset_to_detector()
-            # Reset is now triggered asynchronously from upload_image()
+            # Send reset in background thread (non-blocking)
+            Thread(target=send_reset_to_detector, daemon=True).start()
 
     except Exception as e:
-
-        print(
-            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-            f"❌ BACKGROUND MOVE FAILED: {e}",
-            flush=True
-        )
+        print(f"❌ BACKGROUND MOVE FAILED: {e}", flush=True)
 
 
 # ================= FFMPEG PROCESS MANAGEMENT =================
@@ -861,6 +790,8 @@ def recording_loop():
                     local_path,
                     filename
                 )
+                
+                # REMOVED: cleanup_old_recordings() from here - now runs in background thread
 
         except subprocess.CalledProcessError as e:
 
