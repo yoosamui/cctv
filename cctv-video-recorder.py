@@ -1,4 +1,4 @@
-# Full CCTV Recorder Code v1.8.6
+# Full CCTV Recorder Code v1.8.6 - Fixed (Returns 200 instead of 429)
 
 """
 CCTV Recorder with Person Detection
@@ -360,19 +360,23 @@ def upload_image():
                 f"{detection_id} for {camera_name}"
             )
 
+        # FIXED: Return 200 OK instead of 429 when limit reached
         if session_image_count >= MAX_IMAGES_PER_SESSION:
 
-            print(
-                f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-                f"⚠️ REJECTED: {camera_name} - "
-                f"limit reached ({MAX_IMAGES_PER_SESSION})"
-            )
+            # SILENTLY ACCEPT but don't save - prevents detector from retrying
+            # Only log once per session to reduce noise
+            if session_image_count == MAX_IMAGES_PER_SESSION:
+                print(
+                    f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                    f"📸 {camera_name}: Session full - ignoring additional images"
+                )
 
+            # Return 200 OK to stop detector from retrying
             return {
-                "status": "error",
-                "message": f"Limit reached ({MAX_IMAGES_PER_SESSION})",
+                "status": "success",
+                "message": "Session full (ignored)",
                 "session_count": session_image_count
-            }, 429
+            }, 200
 
         current_prefix = current_video_prefix
 
