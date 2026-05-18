@@ -1,20 +1,68 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.23.7
+# CCTV IMAGE DETECTOR - VERSION 3.23.6
 # ==============================================================================
-#
-# IMPROVEMENTS in v3.23.7:
-#   1. Non-blocking upload retries (fail fast instead of sleeping)
-#   2. Added per-camera upload failure tracking
-#   3. Reduced upload thread blocking to prevent queue backups
-#   4. Added configurable retry mode flag
 #
 # IMPROVEMENTS in v3.23.6:
 #   1. Replaced unsafe _work_queue.qsize() with thread-safe counter
 #   2. Fixed private attribute access for better portability
 #
+# IMPROVEMENTS in v3.23.5:
+#   1. Added bounded queues for memory safety
+#   2. Fixed CameraStream.stop() bug
+#
 # [Previous improvements remain...]
 #
+# IMPROVEMENTS in v3.23.2:
+#   1. Increased POST_RESET_COOLDOWN from 3s to 6s to prevent recorder rejects
+#   2. Added session validation to reject stale uploads from previous sessions
+#   3. Prevent new detections during cooldown period after reset
+#   4. Fixed race condition where old session frames would be accepted after reset
+#
+# IMPROVEMENTS in v3.23.1:
+#   1. Added 429 error handling with exponential backoff
+#   2. Increased retry delays for recorder busy states
+#   3. Better upload resilience
+#
+# IMPROVEMENTS in v3.23.0:
+#   1. Reduced WATCHDOG_TIMEOUT from 600s to 120s for faster recovery
+#   2. Increased YOLO_INPUT_SIZE from 320 to 480 for better accuracy
+#   3. Updated configuration comments for clarity
+#
+# IMPROVEMENTS in v3.22.1:
+#   1. Fixed upload queue with proper backpressure
+#   2. Thread-safe frame access with locks
+#   3. Session state enum instead of multiple booleans
+#   4. Proper YOLO process cleanup with join()
+#   5. Optimized frame handling (reduced copies)
+#
+# WHAT THIS DOES:
+#   Detects people in 6 CCTV camera streams using YOLOv8
+#   Sends annotated images to Raspberry Pi recorders
+#   Receives reset signals when recorders finish saving
+#
+# HOW IT WORKS:
+#   1. CameraStream threads capture frames from RTSP streams
+#   2. YOLO worker process detects people (parallel inference)
+#   3. When person detected -> upload 6 frames to RPi recorder
+#   4. After 6th frame -> wait for recorder to signal completion
+#   5. Recorder signals back via HTTP POST -> reset session
+#
+# ARCHITECTURE:
+#   [6 Cameras] -> [Detector RPI 5] -> [6 RPis 4B] -> [Save Images]
+#                      ↑                      │
+#                      └─── Reset Signal ─────┘
+#                      └───> send images ─────┘
+#
+#
+# DEPENDENCIES:
+#   pip install ultralytics opencv-python flask requests python-dotenv
+#
+# USAGE:
+#   python3 cctv_image_detector.py
+#
+# AUTHOR: yoosamui
+# DATE: 2026-05-15
 # ==============================================================================
 import cv2
 import multiprocessing
@@ -33,7 +81,7 @@ from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 import logging
 
-VERSION = "3.23.7"
+VERSION = "3.23.6"
 
 # ==========================================
 # SILENCE LOGS
@@ -79,7 +127,7 @@ CAM_THREAD_SLEEP = 0.01
 # Recommended:
 #   0.35 = testing / high sensitivity
 #   0.50-0.60 = production
-YOLO_CONFIDENCE = 0.40
+YOLO_CONFIDENCE = 0.35
 
 # YOLO input image size
 # Larger:
@@ -164,21 +212,19 @@ YOLO_RESTART_DELAY = 5
 
 
 # ==========================================
-# UPLOAD RETRY SETTINGS (NON-BLOCKING)
+# UPLOAD RETRY SETTINGS
 # ==========================================
 
-# NEW: Enable non-blocking retries (fail fast instead of sleeping)
-NON_BLOCKING_RETRIES = True
+# Maximum upload retry attempts
+# Helps survive temporary network failures
+UPLOAD_MAX_RETRIES = 3
 
-# Maximum upload retry attempts (only used if NON_BLOCKING_RETRIES = False)
-UPLOAD_MAX_RETRIES = 1  # Reduced from 3 for fail-fast behavior
-
-# Base retry delay (not used in non-blocking mode)
-UPLOAD_RETRY_DELAY_BASE = 1
-
-# Track upload failures per camera (for diagnostics)
-upload_failure_counts = {}
-upload_failure_lock = threading.Lock()
+# Base retry delay in seconds
+# Used for exponential backoff:
+# attempt 1 -> 2s
+# attempt 2 -> 4s
+# attempt 3 -> 6s
+UPLOAD_RETRY_DELAY_BASE = 2
 
 
 # ==========================================
@@ -312,10 +358,6 @@ def session_reset():
             state.last_waiting_start = 0
             state.last_reset_time = now
             state.active_session_id = None  # Clear active session ID on reset
-            
-            # Reset upload failure counter for this camera on successful reset
-            with upload_failure_lock:
-                upload_failure_counts[camera_name] = 0
 
             if was_waiting:
                 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - DETECTION RESUMED")
@@ -345,17 +387,12 @@ def health_check():
                 "active_session_id": state.active_session_id
             }
 
-    with upload_failure_lock:
-        failure_stats = dict(upload_failure_counts)
-
     return jsonify({
         "status": "running",
         "version": VERSION,
-        "non_blocking_retries": NON_BLOCKING_RETRIES,
         "dropped_frames": dropped_frames,
         "dropped_uploads": dropped_uploads,
         "pending_uploads": pending_uploads,
-        "upload_failures": failure_stats,
         "yolo_alive": yolo_process and yolo_process.is_alive() if yolo_process else False,
         "cameras": camera_stats
     }), 200
@@ -366,140 +403,149 @@ def start_webhook_server():
 
 
 # ==========================================
-# UPLOAD FUNCTION WITH NON-BLOCKING RETRIES
+# UPLOAD FUNCTION WITH QUEUE BACKPRESSURE AND RETRY LOGIC
 # ==========================================
 def upload_task(camera_name, url, image_buffer, ts, current_count, max_images, detection_id):
-    """Upload task with non-blocking retries (fail fast)"""
-    global dropped_uploads
+    """Upload task submitted to thread pool with retry logic for 429 errors"""
+
+    max_retries = UPLOAD_MAX_RETRIES
 
     # Check if this upload is from the current active session
     state = camera_states[camera_name]
 
     with state.lock:
+
         # If this upload's session ID doesn't match the current active session, reject it
         if state.active_session_id and detection_id != state.active_session_id:
+
             print(
                 f"[{ts}] 🚫 {camera_name}: "
                 f"Rejected stale upload from session "
                 f"{detection_id} "
                 f"(current: {state.active_session_id})"
             )
-            return
-        # NEW: If we have NO active session ID, this upload is invalid 
-        # (should have started a new session first via handle_results)
-        if state.active_session_id is None and detection_id is not None:
-            print(
-                f"[{ts}] 🚫 {camera_name}: "
-                f"Rejected upload with no active session: {detection_id}"
-            )
+
             return
 
+    for attempt in range(max_retries):
 
+        try:
 
+            files = {
+                'image': (
+                    f"{camera_name}_{ts}.jpg",
+                    image_buffer,
+                    'image/jpeg'
+                )
+            }
 
+            data = {
+                'frame_num': current_count,
+                'total_frames': max_images,
+                'camera': camera_name,
+                'detection_id': detection_id
+            }
 
-    # Attempt upload (single try with fail-fast for 429)
-    try:
-        files = {
-            'image': (
-                f"{camera_name}_{ts}.jpg",
-                image_buffer,
-                'image/jpeg'
+            # ==========================================
+            # AUTH HEADER FOR RECORDER
+            # ==========================================
+            headers = {
+                'X-API-KEY': WEBHOOK_SECRET
+            }
+
+            response = requests.post(
+                url,
+                files=files,
+                data=data,
+                headers=headers,
+                timeout=5
             )
-        }
 
-        data = {
-            'frame_num': current_count,
-            'total_frames': max_images,
-            'camera': camera_name,
-            'detection_id': detection_id
-        }
+            response.raise_for_status()
 
-        headers = {
-            'X-API-KEY': WEBHOOK_SECRET
-        }
+            if current_count == max_images:
 
-        response = requests.post(
-            url,
-            files=files,
-            data=data,
-            headers=headers,
-            timeout=5
-        )
+                with state.lock:
 
-        response.raise_for_status()
+                    if state.state == SessionState.ACTIVE:
+                        state.state = SessionState.WAITING_RESET
+                        state.last_waiting_start = time.time()
 
-        # Track successful upload - reset failure counter
-        with upload_failure_lock:
-            if camera_name in upload_failure_counts:
-                upload_failure_counts[camera_name] = max(0, upload_failure_counts[camera_name] - 1)
+                print(
+                    f"[{ts}] 🛑 {camera_name}: "
+                    f"Last frame sent "
+                    f"({current_count}/{max_images})"
+                )
 
-        # Handle last frame
-        if current_count == max_images:
-            with state.lock:
-                if state.state == SessionState.ACTIVE:
-                    state.state = SessionState.WAITING_RESET
-                    state.last_waiting_start = time.time()
-                    print(
-                        f"[{ts}] 🛑 {camera_name}: "
-                        f"Last frame sent "
-                        f"({current_count}/{max_images})"
-	            )
+            return  # Success, exit function
 
-        return  # Success
+        except requests.exceptions.HTTPError as e:
 
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 429:
-            # Recorder busy - NON-BLOCKING: Just log and fail fast
-            with upload_failure_lock:
-                upload_failure_counts[camera_name] = upload_failure_counts.get(camera_name, 0) + 1
-                failure_count = upload_failure_counts[camera_name]
-            
-            # Only log every 5th failure to reduce noise
-            if failure_count % 5 == 1:
+            if e.response.status_code == 429 and attempt < max_retries - 1:
+
+                # Recorder busy - exponential backoff
+                wait_time = UPLOAD_RETRY_DELAY_BASE * (attempt + 1)
+
                 print(
                     f"[{ts}] ⚠️ {camera_name}: "
-                    f"Recorder busy (429) - will retry next frame "
-                    f"(failures: {failure_count})"
+                    f"Recorder busy (429), retrying in "
+                    f"{wait_time}s... "
+                    f"(attempt {attempt+1}/{max_retries})"
                 )
-            
-            # Don't retry - let the next frame from the main loop handle it
-            # This prevents blocking upload threads
-            return
-            
-        elif e.response.status_code == 503:
-            # Service unavailable
-            print(
-                f"[{ts}] ⚠️ {camera_name}: "
-                f"Recorder unavailable (503) - will retry next frame"
-            )
-            return
-            
-        elif e.response.status_code == 401:
-            print(
-                f"[{ts}] ❌ {camera_name}: "
-                f"Unauthorized upload (401). "
-                f"Check WEBHOOK_SECRET."
-            )
-            return
-            
-        else:
-            print(f"[{ts}] ✗ {camera_name}: Upload failed - {e}")
-            return
 
-    except requests.exceptions.Timeout:
-        print(
-            f"[{ts}] ⚠️ {camera_name}: "
-            f"Upload timeout - will retry next frame"
-        )
-        return
-        
-    except Exception as e:
-        print(
-            f"[{ts}] ✗ {camera_name}: "
-            f"Upload error - {e}"
-        )
-        return
+                time.sleep(wait_time)
+
+            elif e.response.status_code == 503 and attempt < max_retries - 1:
+
+                # Service unavailable - shorter wait
+                print(
+                    f"[{ts}] ⚠️ {camera_name}: "
+                    f"Recorder unavailable (503), retrying in 1s... "
+                    f"(attempt {attempt+1}/{max_retries})"
+                )
+
+                time.sleep(1)
+
+            elif e.response.status_code == 401:
+
+                print(
+                    f"[{ts}] ❌ {camera_name}: "
+                    f"Unauthorized upload (401). "
+                    f"Check WEBHOOK_SECRET."
+                )
+
+                break
+
+            else:
+
+                print(f"[{ts}] ✗ {camera_name}: Upload failed - {e}")
+
+                break
+
+        except Exception as e:
+
+            if attempt < max_retries - 1:
+
+                wait_time = UPLOAD_RETRY_DELAY_BASE
+
+                print(
+                    f"[{ts}] ⚠️ {camera_name}: "
+                    f"Upload error, retrying in "
+                    f"{wait_time}s... "
+                    f"(attempt {attempt+1}/{max_retries})"
+                )
+
+                time.sleep(wait_time)
+
+            else:
+
+                print(
+                    f"[{ts}] ✗ {camera_name}: "
+                    f"Upload failed after "
+                    f"{max_retries} attempts - {e}"
+                )
+
+                break
 
 
 def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_images, detection_id):
@@ -721,12 +767,13 @@ if __name__ == "__main__":
     time.sleep(2)
 
     print("=" * 60)
-    print(f"CCTV DETECTOR v{VERSION} - WITH NON-BLOCKING RETRIES")
+    print(f"CCTV DETECTOR v{VERSION} - WITH THREAD-SAFE STATE")
     print(f"ANALYSIS_INTERVAL: {ANALYSIS_INTERVAL}s")
     print(f"MAX_IMAGES: {MAX_IMAGES} per camera")
     print(f"UPLOAD_WORKERS: {UPLOAD_WORKERS}")
     print(f"UPLOAD_QUEUE_SIZE: {UPLOAD_QUEUE_SIZE}")
-    print(f"NON_BLOCKING_RETRIES: {NON_BLOCKING_RETRIES}")
+    print(f"UPLOAD_MAX_RETRIES: {UPLOAD_MAX_RETRIES}")
+    print(f"UPLOAD_RETRY_DELAY_BASE: {UPLOAD_RETRY_DELAY_BASE}s")
     print(f"YOLO_AUTO_RESTART: Enabled")
     print(f"YOLO_CONFIDENCE: {YOLO_CONFIDENCE}")
     print(f"YOLO_INPUT_SIZE: {YOLO_INPUT_SIZE}")
