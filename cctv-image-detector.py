@@ -99,12 +99,12 @@ logging.getLogger('urllib3').setLevel(logging.WARNING)
 # How often each camera is analyzed by YOLO (seconds)
 # Lower = faster detection but higher CPU usage
 # Higher = lower CPU usage but slower detection response
-ANALYSIS_INTERVAL = 4
+ANALYSIS_INTERVAL = 3
 
 # Maximum images uploaded per detection session
 # Example:
 # Person detected -> send max 6 images -> wait for recorder reset
-MAX_IMAGES = 6
+MAX_IMAGES = 3
 
 # Minimum time between starting new detection sessions (seconds)
 # Prevents repeated triggering from same person standing still
@@ -127,7 +127,7 @@ CAM_THREAD_SLEEP = 0.01
 # Recommended:
 #   0.35 = testing / high sensitivity
 #   0.50-0.60 = production
-YOLO_CONFIDENCE = 0.35
+YOLO_CONFIDENCE = 0.50
 
 # YOLO input image size
 # Larger:
@@ -146,7 +146,7 @@ YOLO_CONFIDENCE = 0.35
 #   416 = balanced
 #   480 = better accuracy
 #   640 = heavy CPU usage
-YOLO_INPUT_SIZE = 416
+YOLO_INPUT_SIZE = 480
 
 # Intersection-over-Union threshold for Non-Maximum Suppression (NMS)
 # Helps remove duplicate overlapping boxes
@@ -158,7 +158,7 @@ YOLO_INPUT_SIZE = 416
 # Higher:
 #   + keeps more boxes
 #   - more duplicate boxes possible
-YOLO_IOU = 0.45
+YOLO_IOU = 0.45  # was 0.45
 
 # JPEG quality for uploaded images
 # Higher:
