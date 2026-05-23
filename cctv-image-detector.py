@@ -668,6 +668,7 @@ class CameraStream:
             try:
                 if cap is None:
                     cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1) # This reduces stale frame buildup.
                     if not cap.isOpened():
                         raise Exception("Failed to open camera")
                     consecutive_failures = 0
