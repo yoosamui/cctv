@@ -4,6 +4,8 @@
 *.yml
 *.env
 *.conf
+*.onnx
+*.onnx_*
 __pycache__/
 *.py[codz]
 *$py.class
