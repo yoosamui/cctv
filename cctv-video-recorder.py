@@ -133,7 +133,7 @@ else:
     print("Authentication to detector will fail!")
 
 # Detector webhook URL
-DETECTOR_WEBHOOK_URL = "http://192.168.1.103:5001/session-reset"
+DETECTOR_WEBHOOK_URL = "http://192.168.1.19:5001/session-reset"
 
 # ================= GLOBAL STATE =================
 CAM_NAME = None
