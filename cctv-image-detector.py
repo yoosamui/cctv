@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.23.7
+# CCTV IMAGE DETECTOR - VERSION 3.23.6
 # ==============================================================================
 #
 # IMPROVEMENTS in v3.23.6:
@@ -85,7 +85,7 @@ import logging
 
 
 
-VERSION = "3.23.7"
+VERSION = "3.23.6"
 
 # ==========================================
 # SILENCE LOGS
@@ -366,7 +366,7 @@ def session_reset():
             if was_waiting:
                 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - DETECTION RESUMED")
             elif old_count > 0:
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - CLEANED UP PARTIAL SESSION ({old_count}/6 frames)")
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - CLEANED UP PARTIAL SESSION ({old_count}/{MAX_IMAGES} frames)")
 
         return '', 200
     except Exception as e:
@@ -555,12 +555,12 @@ def upload_task(camera_name, url, image_buffer, ts, current_count, max_images, d
 def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_images, detection_id):
     """Draw bounding boxes and queue upload to thread pool with backpressure"""
     global pending_uploads, dropped_uploads
-
+    
     yellow = (0, 255, 255)
     for d in detections:
         x1, y1, x2, y2 = d["box"]
         label = f"PERSON {d['conf']:.2f}"
-        cv2.rectangle(frame, (x1, y1), (x2, y2), yellow, 1)
+       # cv2.rectangle(frame, (x1, y1), (x2, y2), yellow, 1)
         (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
         cv2.rectangle(frame, (x1, y1 - 20), (x1 + w, y1), yellow, -1)
         cv2.putText(frame, label, (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
@@ -575,7 +575,7 @@ def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_
                     print(f"[{ts}] ⚠️ Upload queue full ({pending_uploads} pending), dropped frame {current_count}/{max_images}")
                 return
             pending_uploads += 1
-
+        
         def upload_wrapper(*args, **kwargs):
             try:
                 return upload_task(*args, **kwargs)
@@ -583,7 +583,7 @@ def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_
                 with pending_uploads_lock:
                     global pending_uploads
                     pending_uploads -= 1
-
+        
         upload_executor.submit(upload_wrapper, camera_name, url, buffer.tobytes(),
                                ts, current_count, max_images, detection_id)
 
@@ -594,53 +594,53 @@ def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_
 # Here's a minimal NMS version that removes duplicates but keeps CPU low:
 def yolo_worker_process(input_q, output_q):
     """Ultra-light with MINIMAL NMS (only merges obvious duplicates)"""
-
+    
     import numpy as np
     import cv2
     import onnxruntime as ort
-
+    
     try:
         print("Loading yolov8n.onnx with pure ONNX Runtime...")
         so = ort.SessionOptions()
         so.intra_op_num_threads = 1
         so.inter_op_num_threads = 1
-
+        
         session = ort.InferenceSession(
             "yolov8n.onnx",
             sess_options=so,
             providers=["CPUExecutionProvider"]
         )
-
+        
         input_name = session.get_inputs()[0].name
         print("Pure ONNX Runtime initialized")
         print("Ultra-light + smart NMS (minimal CPU increase)")
-
+        
     except Exception as e:
         print(f"❌ ONNX load failed: {e}")
         return
-
+    
     frame_dims = None
     scale_x = scale_y = 1.0
-
+    
     while True:
         try:
             name, frame, ts, capture_time = input_q.get(timeout=0.5)
-
+            
             if frame_dims is None:
                 h, w = frame.shape[:2]
                 frame_dims = (h, w)
                 scale_x = w / YOLO_INPUT_SIZE
                 scale_y = h / YOLO_INPUT_SIZE
-
+            
             # Preprocessing
             img = cv2.resize(frame, (YOLO_INPUT_SIZE, YOLO_INPUT_SIZE))
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             img = (img.astype(np.float32) / 255.0).transpose(2, 0, 1).reshape(1, 3, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE)
-
+            
             # Inference
             outputs = session.run(None, {input_name: img})
             predictions = outputs[0][0]
-
+            
             # Parse detections
             detections = []
             for pred in predictions.T:
@@ -649,18 +649,18 @@ def yolo_worker_process(input_q, output_q):
                     continue
                 if np.argmax(pred[4:]) != 0:
                     continue
-
+                
                 xc, yc, w, h = pred[:4]
                 x1 = int((xc - w/2) * scale_x)
                 y1 = int((yc - h/2) * scale_y)
                 x2 = int((xc + w/2) * scale_x)
                 y2 = int((yc + h/2) * scale_y)
-
+                
                 detections.append({
                     "box": [x1, y1, x2, y2],
                     "conf": float(confidence)
                 })
-
+            
             # ==========================================
             # SUPER FAST NMS (only if >2 detections)
             # ==========================================
@@ -668,31 +668,31 @@ def yolo_worker_process(input_q, output_q):
                 # Simple overlap removal (faster than cv2.dnn.NMSBoxes)
                 filtered = []
                 detections.sort(key=lambda x: x['conf'], reverse=True)
-
+                
                 for i, d1 in enumerate(detections):
                     keep = True
                     x1, y1, x2, y2 = d1['box']
                     area1 = (x2 - x1) * (y2 - y1)
-
+                    
                     for d2 in filtered:
                         xx1 = max(x1, d2['box'][0])
                         yy1 = max(y1, d2['box'][1])
                         xx2 = min(x2, d2['box'][2])
                         yy2 = min(y2, d2['box'][3])
-
+                        
                         if xx2 > xx1 and yy2 > yy1:
                             overlap = (xx2 - xx1) * (yy2 - yy1)
                             if overlap / area1 > 0.5:  # >50% overlap
                                 keep = False
                                 break
-
+                    
                     if keep:
                         filtered.append(d1)
-
+                
                 detections = filtered
-
+            
             output_q.put((name, frame, detections, ts, capture_time))
-
+            
         except Empty:
             continue
         except Exception as e:
@@ -705,54 +705,54 @@ def yolo_worker_process(input_q, output_q):
 # the absolute lowest CPU usage and can accept occasional duplicate boxes:
 def yolo_worker_process_GOOD_CPU_1_thread(input_q, output_q):
     """Ultra-light YOLO - NO NMS, minimal CPU"""
-
+    
     import numpy as np
     import cv2
     import onnxruntime as ort
-
+    
     try:
         print("Loading yolov8n.onnx with pure ONNX Runtime...")
         so = ort.SessionOptions()
         so.intra_op_num_threads = 1  # Single thread only was 2
         so.inter_op_num_threads = 1
         so.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-
+        
         session = ort.InferenceSession(
             "yolov8n.onnx",
             sess_options=so,
             providers=["CPUExecutionProvider"]
         )
-
+        
         input_name = session.get_inputs()[0].name
         print("Pure ONNX Runtime initialized")
         print("Ultra-light YOLO mode (no NMS)")
-
+        
     except Exception as e:
         print(f"ONNX load failed: {e}")
         return
-
+    
     frame_dims = None
     scale_x = scale_y = 1.0
-
+    
     while True:
         try:
             name, frame, ts, capture_time = input_q.get(timeout=0.5)
-
+            
             if frame_dims is None:
                 h, w = frame.shape[:2]
                 frame_dims = (h, w)
                 scale_x = w / YOLO_INPUT_SIZE
                 scale_y = h / YOLO_INPUT_SIZE
-
+            
             # Fast preprocessing
             img = cv2.resize(frame, (YOLO_INPUT_SIZE, YOLO_INPUT_SIZE))
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             img = (img.astype(np.float32) / 255.0).transpose(2, 0, 1).reshape(1, 3, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE)
-
+            
             # Inference
             outputs = session.run(None, {input_name: img})
             predictions = outputs[0][0]
-
+            
             # Parse detections (no NMS at all)
             detections = []
             for pred in predictions.T:
@@ -761,7 +761,7 @@ def yolo_worker_process_GOOD_CPU_1_thread(input_q, output_q):
                     continue
                 if np.argmax(pred[4:]) != 0:
                     continue
-
+                
                 xc, yc, w, h = pred[:4]
                 detections.append({
                     "box": [
@@ -772,9 +772,9 @@ def yolo_worker_process_GOOD_CPU_1_thread(input_q, output_q):
                     ],
                     "conf": float(confidence)
                 })
-
+            
             output_q.put((name, frame, detections, ts, capture_time))
-
+            
         except Empty:
             continue
         except Exception as e:
@@ -787,117 +787,117 @@ def yolo_worker_process_GOOD_CPU_1_thread(input_q, output_q):
 # gives you low CPU usage AND clean detections:
 def yolo_worker_process_GUT_AND_NMM(input_q, output_q):
     """Optimized YOLO inference - Low CPU + Clean Detections"""
-
+    
     import numpy as np
     import cv2
     import onnxruntime as ort
-
+    
     try:
         print("Loading optimized YOLO ONNX model...")
-
+        
         # Optimize ONNX Runtime for lower CPU
         so = ort.SessionOptions()
         so.intra_op_num_threads = 2      # Limit CPU threads
-        so.inter_op_num_threads = 1
+        so.inter_op_num_threads = 1      
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
         so.enable_cpu_mem_arena = False  # Reduce memory overhead
-
+        
         # Enable all optimizations
         so.add_session_config_entry("session.intra_op.use_deterministic_compute", "0")
-
+        
         session = ort.InferenceSession(
             "yolov8n.onnx",
             sess_options=so,
             providers=["CPUExecutionProvider"]
         )
-
+        
         input_name = session.get_inputs()[0].name
         print(f"ONNX Runtime ready (threads: {so.intra_op_num_threads})")
-
+        
     except Exception as e:
         print(f"ONNX load failed: {e}")
         return
-
+    
     # Cache values to avoid recomputation
     frame_dims = None
     scale_x = 1.0
     scale_y = 1.0
-
+    
     # Pre-allocate buffer for NMS (reused)
     boxes_buffer = []
     scores_buffer = []
-
+    
     while True:
         try:
             name, frame, ts, capture_time = input_q.get(timeout=0.5)
-
+            
             # Cache frame dimensions (first frame only)
             if frame_dims is None:
                 h, w = frame.shape[:2]
                 frame_dims = (h, w)
                 scale_x = w / YOLO_INPUT_SIZE
                 scale_y = h / YOLO_INPUT_SIZE
-
+            
             # ==========================================
             # FAST PREPROCESSING
             # ==========================================
             # Resize and convert in one go where possible
             img = cv2.resize(frame, (YOLO_INPUT_SIZE, YOLO_INPUT_SIZE))
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
+            
             # Normalize and transpose (combined operations)
             img = img.astype(np.float32) / 255.0
             img = np.transpose(img, (2, 0, 1))
             img = np.expand_dims(img, axis=0)
-
+            
             # ==========================================
             # INFERENCE
             # ==========================================
             outputs = session.run(None, {input_name: img})
             predictions = outputs[0][0]  # Shape: (84, num_detections)
-
+            
             # Early exit if no detections
             if predictions.shape[1] == 0:
                 output_q.put((name, frame, [], ts, capture_time))
                 continue
-
+            
             # ==========================================
             # FAST DETECTION PARSING
             # ==========================================
             detections = []
-
+            
             # Process each detection
             for pred in predictions.T:
                 # Get confidence (class scores start at index 4)
                 class_scores = pred[4:]
                 confidence = np.max(class_scores)
-
+                
                 # Fast confidence filter
                 if confidence < YOLO_CONFIDENCE:
                     continue
-
+                
                 # Check if it's a person (class 0)
                 if np.argmax(class_scores) != 0:
                     continue
-
+                
                 # Extract box coordinates
                 x_center, y_center, w, h = pred[:4]
-
+                
                 # Calculate final box coordinates
                 x1 = int((x_center - w / 2) * scale_x)
                 y1 = int((y_center - h / 2) * scale_y)
                 x2 = int((x_center + w / 2) * scale_x)
                 y2 = int((y_center + h / 2) * scale_y)
-
+                
                 # Basic validation (prevent invalid boxes)
                 if x2 <= x1 or y2 <= y1:
                     continue
-
+                
                 detections.append({
                     "box": [x1, y1, x2, y2],
                     "conf": float(confidence)
                 })
-
+            
             # ==========================================
             # OPTIMIZED NMS - ONLY WHEN NEEDED
             # ==========================================
@@ -905,12 +905,12 @@ def yolo_worker_process_GUT_AND_NMM(input_q, output_q):
                 # Reuse buffers to reduce allocations
                 boxes_buffer.clear()
                 scores_buffer.clear()
-
+                
                 for det in detections:
                     x1, y1, x2, y2 = det["box"]
                     boxes_buffer.append([x1, y1, x2 - x1, y2 - y1])
                     scores_buffer.append(det["conf"])
-
+                
                 # Only run NMS if we have overlapping boxes
                 # Quick check: if boxes don't overlap much, skip NMS
                 need_nms = False
@@ -928,7 +928,7 @@ def yolo_worker_process_GUT_AND_NMM(input_q, output_q):
                 else:
                     # Many detections - definitely need NMS
                     need_nms = True
-
+                
                 if need_nms:
                     indices = cv2.dnn.NMSBoxes(
                         boxes_buffer,
@@ -936,16 +936,16 @@ def yolo_worker_process_GUT_AND_NMM(input_q, output_q):
                         YOLO_CONFIDENCE,
                         YOLO_IOU
                     )
-
+                    
                     if len(indices) > 0:
                         detections = [detections[i] for i in indices.flatten()]
                 # else: skip NMS, detections already good
-
+            
             # ==========================================
             # SEND RESULTS
             # ==========================================
             output_q.put((name, frame, detections, ts, capture_time))
-
+            
         except Empty:
             continue
         except Exception as e:
@@ -958,22 +958,22 @@ def yolo_worker_process_GUT_AND_NMM(input_q, output_q):
 # remove NMS entirely and rely on the model's built-in NMS
 def yolo_worker_process_GUT(input_q, output_q):
     """Pure ONNX Runtime YOLO inference - MINIMAL CPU"""
-
+    
     import numpy as np
     import cv2
-
+    
     try:
         so = ort.SessionOptions()
         so.intra_op_num_threads = 2
         so.inter_op_num_threads = 1
         so.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-
+        
         session = ort.InferenceSession(
             "yolov8n.onnx",
             sess_options=so,
             providers=["CPUExecutionProvider"]
         )
-
+        
         input_name = session.get_inputs()[0].name
         print("ONNX Runtime initialized (no extra NMS)")
 
@@ -983,11 +983,11 @@ def yolo_worker_process_GUT(input_q, output_q):
 
     frame_height, frame_width = None, None
     scale_x, scale_y = 1.0, 1.0
-
+    
     while True:
         try:
             name, frame, ts, capture_time = input_q.get(timeout=0.5)
-
+            
             if frame_height is None:
                 frame_height, frame_width = frame.shape[:2]
                 scale_x = frame_width / YOLO_INPUT_SIZE
@@ -1003,19 +1003,19 @@ def yolo_worker_process_GUT(input_q, output_q):
             predictions = outputs[0][0]
 
             detections = []
-
+            
             # OPTIMIZATION: Skip NMS entirely, just filter by confidence
             for pred in predictions.T:
                 confidence = np.max(pred[4:])
                 if confidence < YOLO_CONFIDENCE:
                     continue
-
+                
                 class_id = np.argmax(pred[4:])
                 if class_id != 0:
                     continue
 
                 x_center, y_center, w, h = pred[:4]
-
+                
                 detections.append({
                     "box": [
                         int((x_center - w / 2) * scale_x),
@@ -1039,10 +1039,10 @@ def yolo_worker_process_GUT(input_q, output_q):
 
 def yolo_worker_process_NMS_BALNCE_CPU(input_q, output_q):
     """Pure ONNX Runtime YOLO inference - OPTIMIZED for lower CPU"""
-
+    
     import numpy as np
     import cv2
-
+    
     try:
         print("Loading yolov8n.onnx with pure ONNX Runtime...")
 
@@ -1068,11 +1068,11 @@ def yolo_worker_process_NMS_BALNCE_CPU(input_q, output_q):
     # Pre-allocate buffers to reduce memory allocations
     frame_height = None
     frame_width = None
-
+    
     while True:
         try:
             name, frame, ts, capture_time = input_q.get(timeout=0.5)
-
+            
             # Cache frame dimensions
             if frame_height is None:
                 frame_height, frame_width = frame.shape[:2]
@@ -1089,7 +1089,7 @@ def yolo_worker_process_NMS_BALNCE_CPU(input_q, output_q):
             predictions = outputs[0][0]
 
             detections = []
-
+            
             # Scale factors (pre-compute once)
             scale_x = frame_width / YOLO_INPUT_SIZE
             scale_y = frame_height / YOLO_INPUT_SIZE
@@ -1102,17 +1102,17 @@ def yolo_worker_process_NMS_BALNCE_CPU(input_q, output_q):
             # OPTIMIZATION 2: Vectorized operations where possible
             for pred in predictions.T:
                 confidence = np.max(pred[4:])
-
+                
                 # Fast path: skip low confidence early
                 if confidence < YOLO_CONFIDENCE:
                     continue
-
+                
                 class_id = np.argmax(pred[4:])
                 if class_id != 0:  # person class only
                     continue
 
                 x_center, y_center, w, h = pred[:4]
-
+                
                 # Calculate box coordinates
                 x1 = int((x_center - w / 2) * scale_x)
                 y1 = int((y_center - h / 2) * scale_y)
@@ -1133,7 +1133,7 @@ def yolo_worker_process_NMS_BALNCE_CPU(input_q, output_q):
                     x1, y1, x2, y2 = d["box"]
                     boxes.append([x1, y1, x2 - x1, y2 - y1])
                     scores.append(d["conf"])
-
+                
                 # OPTIMIZATION 4: Use faster NMS parameters
                 indices = cv2.dnn.NMSBoxes(
                     boxes,
@@ -1141,7 +1141,7 @@ def yolo_worker_process_NMS_BALNCE_CPU(input_q, output_q):
                     YOLO_CONFIDENCE,
                     YOLO_IOU
                 )
-
+                
                 if len(indices) > 0:
                     # Rebuild detections list with NMS results
                     detections = [detections[i] for i in indices.flatten()]
@@ -1526,7 +1526,7 @@ def session_watchdog():
 # MAIN
 # ==========================================
 if __name__ == "__main__":
-
+    
     start_webhook_server()
 
     # ✅ Both queues now have bounds to prevent memory leaks
@@ -1534,8 +1534,8 @@ if __name__ == "__main__":
     result_q = multiprocessing.Queue(maxsize=RESULT_QUEUE_SIZE)
 
     start_yolo_worker(task_q, result_q)
-
-
+    
+    
     threading.Thread(target=check_yolo_health, args=(task_q, result_q), daemon=True).start()
 
     streams = {n: CameraStream(n, cfg["cam_rtsp"]) for n, cfg in NODES.items()}
