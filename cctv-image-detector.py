@@ -7,8 +7,8 @@
 #   1. Fixed YOLO worker process to receive configuration values from main process
 #   2. Removed hardcoded validation values in worker
 #   3. Added camera-specific thresholds passed to worker
-#   4. Lowered default MIN_PERSON_AREA to 1500 for better night detection
-#   5. Lowered MIN_ASPECT_RATIO to 0.8 for high-mounted cameras
+#   4. Lowered default MIN_PERSON_AREA to 400 for better night detection
+#   5. Lowered MIN_ASPECT_RATIO to 1.2 for high-mounted cameras
 #
 # AUTHOR: yoosamui
 # DATE: 2026-05-29
@@ -45,7 +45,7 @@ logging.getLogger('urllib3').setLevel(logging.WARNING)
 # ==========================================
 # CONFIGURATION
 # ==========================================
-#controls how often YOLO analyzes a new frame from each camera.
+# controls how often YOLO analyzes a new frame from each camera.
 ANALYSIS_INTERVAL = 2.5
 
 MAX_IMAGES = 3
@@ -429,30 +429,30 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
             if len(detections) > 0:
                 # Sort by confidence (highest first)
                 detections.sort(key=lambda x: x['conf'], reverse=True)
-                
+
                 filtered = []
-                
+
                 for d1 in detections:
                     keep = True
                     x1, y1, x2, y2 = d1['box']
                     area1 = (x2 - x1) * (y2 - y1)
-                    
+
                     for d2 in filtered:
                         xx1 = max(x1, d2['box'][0])
                         yy1 = max(y1, d2['box'][1])
                         xx2 = min(x2, d2['box'][2])
                         yy2 = min(y2, d2['box'][3])
-                        
+
                         if xx2 > xx1 and yy2 > yy1:
                             overlap = (xx2 - xx1) * (yy2 - yy1)
                             # If >50% overlap, keep only the one with higher confidence
                             if overlap / area1 > 0.5:
                                 keep = False
                                 break
-                    
+
                     if keep:
                         filtered.append(d1)
-                
+
                 detections = filtered
 
             output_q.put((name, frame, detections, ts, capture_time))
