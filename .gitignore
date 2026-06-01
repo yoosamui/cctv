@@ -13,6 +13,8 @@ infos.txt
 # C extensions
 *.so
 # Distribution / packaging
+rejected/
+testing/
 bak/
 models/
 .Python
