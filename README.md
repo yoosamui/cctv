@@ -9,6 +9,9 @@ An intelligent, decentralized, edge-AI CCTV detection system optimized for low-r
 The system splits the workload across a cluster of Raspberry Pis. 6 IP cameras record 24/7 continuously to dedicated storage, while a Raspberry Pi 5 handles real-time machine learning inference, communicating asynchronously back to the recorders via webhooks.
 
 ```text
+
+**Example:**
+
        [STORAGE RECORDER NETWORK]
        
  (Center)  (Gate)  (Entrance) (Garage)  (Behind)   (Left)    [Detector]
