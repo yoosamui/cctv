@@ -432,12 +432,13 @@ Session ID lifecycle:
 
 **Important Timers**
 ```
-Timer	          Value	             Purpose
-COOLDOWN	          5.0 seconds	   Wait after session ends before starting new one (prevents rapid re-triggering)
-SESSION_TIMEOUT	300 seconds (5 min)	   Force reset if no frames received (stuck in ACTIVE)
-WATCHDOG_TIMEOUT	300 seconds (5 min)	   Force reset if stuck in WAITING_RESET
-RESET_DEDUP_WINDOW	2 seconds	             Ignore duplicate reset signals
-POST_RESET_COOLDOWN	(unified into COOLDOWN)Legacy - now using COOLDOWN
+| Timer                 | Value               | Purpose                                                                 |
+|-----------------------|---------------------|-------------------------------------------------------------------------|
+| `COOLDOWN`            | 5.0 seconds         | Wait after a session ends before starting a new one (prevents rapid re-triggering). |
+| `SESSION_TIMEOUT`     | 300 seconds (5 min) | Force reset if no frames are received while in the `ACTIVE` state.      |
+| `WATCHDOG_TIMEOUT`    | 300 seconds (5 min) | Force reset if the system is stuck in the `WAITING_RESET` state.        |
+| `RESET_DEDUP_WINDOW`  | 2 seconds           | Ignore duplicate reset signals.                                         |
+| `POST_RESET_COOLDOWN` | Unified into `COOLDOWN` | Legacy setting; now replaced by `COOLDOWN`.                         |
 ```
 
 **Example: Complete Walk-through**
