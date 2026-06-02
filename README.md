@@ -407,13 +407,21 @@ Behavior:
 **State Transitions Summary**
 
 ```
-From                    To	                    Trigger
-IDLE                    ACTIVE	          Valid person detection + cooldown passed
-ACTIVE                  WAITING_RESET	          3 frames sent to recorder
-WAITING_RESET	    COMPLETED	          Recorder sends /session-reset webhook
-COMPLETED	              IDLE	                    5-second auto-cleanup
-ACTIVE	              IDLE	                    Session timeout (no activity for SESSION_TIMEOUT seconds)
-WAITING_RESET	    IDLE	                    Watchdog force reset (stuck for WATCHDOG_TIMEOUT seconds)
+
+From                    To	                          Trigger
+-------------------------------------------------------------------
+IDLE                   ACTIVE			Valid person detection + cooldown passed
+-------------------------------------------------------------------
+ACTIVE                 WAITING_RESET		3 frames sent to recorder
+-------------------------------------------------------------------
+WAITING_RESET          COMPLETED		Recorder sends /session-reset webhook
+-------------------------------------------------------------------
+COMPLETED              IDLE			5-second auto-cleanup
+-------------------------------------------------------------------
+ACTIVE		   IDLE			Session timeout (no activity for SESSION_TIMEOUT seconds)
+-------------------------------------------------------------------
+WAITING_RESET	   IDLE			Watchdog force reset (stuck for WATCHDOG_TIMEOUT seconds)
+
 ```
 
 This is actually one of the strongest parts of the system.
