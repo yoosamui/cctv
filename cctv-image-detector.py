@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.24.6
+# CCTV IMAGE DETECTOR - VERSION 3.24.7
 # ==============================================================================
+#
+# IMPROVEMENTS in v3.24.7:
+#   1. Added rate-limited image saving for rejected detections
+#      - New SAVE_IMAGE_INTERVAL config (default 5.0 seconds)
+#      - Separate timers for each rejection type (area, maxarea, aspect, topedge)
+#      - Prevents disk flooding from thousands of rejected images
+#   2. Same pattern as debug logging - one image per 5 seconds per camera per rejection type
 #
 # IMPROVEMENTS in v3.24.6:
 #   1. Fixed shared log dictionary bug (separate _last_maxarea_log_time for max area filter)
 #   2. Ensured each filter has its own independent rate-limit timer for debug logging
-#      - AREA (too small) uses _last_area_log_time
-#      - MAX AREA (too large) uses _last_maxarea_log_time
-#      - ASPECT RATIO uses _last_aspect_log_time
-#      - TOP-EDGE rejection uses _last_topedge_log_time
-#      - TOP-EDGE acceptance uses _last_topedge_accept_log_time
-#   3. This prevents one filter's debug messages from suppressing another filter's messages
 #
 # IMPROVEMENTS in v3.24.5:
 #   1. Fixed duplicate image annotation (removed unused annotated_frame variable)
@@ -23,7 +24,7 @@
 #   3. Added save_rejected_image support for area_too_large rejections
 #
 # AUTHOR: yoosamui
-# DATE: 2026-06-01
+# DATE: 2026-06-02
 # ==============================================================================
 import glob
 import cv2
@@ -36,6 +37,7 @@ import sys
 import uuid
 import onnxruntime as ort
 import numpy as np
+import configparser
 from queue import Empty, Full
 from urllib.parse import quote
 from dotenv import load_dotenv
@@ -44,8 +46,12 @@ from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
 import logging
 from collections import defaultdict
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.image import MIMEImage
 
-VERSION = "3.24.6"
+VERSION = "3.24.7"
 
 # ==========================================
 # SILENCE LOGS
@@ -56,87 +62,99 @@ logging.getLogger('werkzeug').setLevel(logging.CRITICAL)
 logging.getLogger('requests').setLevel(logging.WARNING)
 logging.getLogger('urllib3').setLevel(logging.WARNING)
 
+
+# ==========================================
+# LOAD CONFIRATION
+# ==========================================
+
+config = configparser.ConfigParser()
+
+if not config.read("/etc/cctv/config.ini"):
+    print("ERROR: Failed to load /etc/cctv/config.ini")
+    sys.exit(1)
+
+# ==========================================
+# CONFIGURATION HELPERS
+# ==========================================
+def cfg_int(section, key):
+    return config.getint(section, key)
+
+def cfg_float(section, key):
+    return config.getfloat(section, key)
+
+def cfg_bool(section, key):
+    return config.getboolean(section, key)
+
+def cfg_str(section, key):
+    return config.get(section, key)
+
+
 # ==========================================
 # CONFIGURATION
 # ==========================================
-ANALYSIS_INTERVAL = 3               # controls how often YOLO analyzes a new frame from each camera.
-MAX_IMAGES = 3                      # Number of frames to capture per detection session
-COOLDOWN = 5.0                      # Unified cooldown: seconds to wait after session ends or reset before starting new one
-CAM_THREAD_SLEEP = 0.05             # Seconds between camera frame capture attempts
-YOLO_CONFIDENCE = 0.25              # Minimum confidence score (0-1) - lower = more sensitive but more false positives
-YOLO_INPUT_SIZE = 480               # Resize frames to 480x480 pixels before YOLO inference
-YOLO_IOU = 0.40                     # IoU threshold for Non-Maximum Suppression (overlap removal)
-JPEG_QUALITY = 80                   # JPEG compression quality (1-100, higher = better quality but larger files)
-WEBHOOK_PORT = 5001                 # Port for Flask webhook server (receives reset signals from recorder)
-SESSION_TIMEOUT = 300               # Seconds (5 min) - force reset idle sessions with no activity
-WATCHDOG_TIMEOUT = 300              # Seconds (5 min) - force reset sessions stuck in WAITING_RESET state
-WATCHDOG_CHECK = 10                 # Seconds between watchdog checks for stuck sessions
-RESET_DEDUP_WINDOW = 2              # Seconds to ignore duplicate reset signals from recorder
-DRAW_BOUNDING_BOXES = True          # Set to True to draw bounding boxes on uploaded images
+ANALYSIS_INTERVAL = cfg_int("GENERAL", "ANALYSIS_INTERVAL")
+MAX_IMAGES = cfg_int("GENERAL", "MAX_IMAGES")
+COOLDOWN = cfg_float("GENERAL", "COOLDOWN")
+CAM_THREAD_SLEEP = cfg_float("GENERAL", "CAM_THREAD_SLEEP")
+WEBHOOK_PORT = cfg_int("GENERAL", "WEBHOOK_PORT")
 
-# ==========================================
-# RATE LIMITED DEBUG LOGGING
-# ==========================================
-DEBUG_LOG_INTERVAL = 300.0     # Seconds between repeated debug messages
-ENABLE_DEBUG_PRINTS = True     # set to False to disable debug logs
+YOLO_CONFIDENCE = cfg_float("YOLO", "CONFIDENCE")
+YOLO_INPUT_SIZE = cfg_int("YOLO", "INPUT_SIZE")
+YOLO_IOU = cfg_float("YOLO", "IOU")
+YOLO_RESTART_DELAY = cfg_int("YOLO", "RESTART_DELAY")
 
-# ==========================================
-# DEBUG - REJECTED IMAGES
-# ==========================================
-SAVE_REJECTED_IMAGES = False    # Save images rejected by filters for debugging
-REJECTED_IMAGES_DIR = "/home/pi/cctv_rejected"
-MAX_REJECTED_IMAGES = 100      # Max number of rejected images to keep (rotates)
+JPEG_QUALITY = cfg_int("IMAGE", "JPEG_QUALITY")
+DRAW_BOUNDING_BOXES = cfg_bool("IMAGE", "DRAW_BOUNDING_BOXES")
 
-# ==========================================
-# PERSON VALIDATION FILTERS
-# ==========================================
-ENABLE_AREA_FILTER = True      # Too small? Probably not a person
-ENABLE_ASPECT_FILTER = True    # Wrong shape? Probably not a person
+SESSION_TIMEOUT = cfg_int("SESSION", "SESSION_TIMEOUT")
+WATCHDOG_TIMEOUT = cfg_int("SESSION", "WATCHDOG_TIMEOUT")
+WATCHDOG_CHECK = cfg_int("SESSION", "WATCHDOG_CHECK")
+RESET_DEDUP_WINDOW = cfg_int("SESSION", "RESET_DEDUP_WINDOW")
 
-# TOP-EDGE (GROUND) FILTER CONFIGURATION
-TOP_EDGE_MARGIN = 20           # Pixels from top edge considered "airborne" (suspicious)
-TOP_EDGE_HIGH_CONF = 0.75      # Minimum confidence required to keep top-edge detections
-ENABLE_TOP_EDGE_FILTER = True  # Enable/disable the top-edge ground filter
+DEBUG_LOG_INTERVAL = cfg_float("DEBUG", "DEBUG_LOG_INTERVAL")
+ENABLE_DEBUG_PRINTS = cfg_bool("DEBUG", "ENABLE_DEBUG_PRINTS")
+SAVE_IMAGE_INTERVAL = cfg_float("DEBUG", "SAVE_IMAGE_INTERVAL")
 
-# ==========================================
-# GLOBAL DEFAULTS (used if camera not in below dictionaries)
-# ==========================================
-MIN_PERSON_AREA = 400
-MIN_ASPECT_RATIO = 1.2
-MAX_ASPECT_RATIO = 4.0
+SAVE_REJECTED_IMAGES = cfg_bool("DEBUG", "SAVE_REJECTED_IMAGES")
+REJECTED_IMAGES_DIR = cfg_str("DEBUG", "REJECTED_IMAGES_DIR")
+MAX_REJECTED_IMAGES = cfg_int("DEBUG", "MAX_REJECTED_IMAGES")
 
-# ==========================================
-# CAMERA-SPECIFIC ASPECT RATIO FILTERS
-# ==========================================
-CAMERA_ASPECT_RATIOS = {
-    'Gate': (1.4, 4.0),
-    'Center': (1.5, 4.0),
-    'Entrance': (1.2, 4.0),
-    'Garage': (1.2, 4.0),
-    'Behind': (1.2, 4.0),
-    'Left': (1.2, 4.0)
-}
+ENABLE_AREA_FILTER = cfg_bool("FILTERS", "ENABLE_AREA_FILTER")
+ENABLE_ASPECT_FILTER = cfg_bool("FILTERS", "ENABLE_ASPECT_FILTER")
+ENABLE_TOP_EDGE_FILTER = cfg_bool("FILTERS", "ENABLE_TOP_EDGE_FILTER")
 
-# ==========================================
-# CAMERA-SPECIFIC MIN/MAX AREA THRESHOLDS
-# ==========================================
+MIN_PERSON_AREA = cfg_int("FILTERS", "MIN_PERSON_AREA")
+MIN_ASPECT_RATIO = cfg_float("FILTERS", "MIN_ASPECT_RATIO")
+MAX_ASPECT_RATIO = cfg_float("FILTERS", "MAX_ASPECT_RATIO")
+
+TOP_EDGE_MARGIN = cfg_int("FILTERS", "TOP_EDGE_MARGIN")
+TOP_EDGE_HIGH_CONF = cfg_float("FILTERS", "TOP_EDGE_HIGH_CONF")
+
+UPLOAD_WORKERS = cfg_int("UPLOAD", "UPLOAD_WORKERS")
+UPLOAD_QUEUE_SIZE = cfg_int("UPLOAD", "UPLOAD_QUEUE_SIZE")
+UPLOAD_MAX_RETRIES = cfg_int("UPLOAD", "UPLOAD_MAX_RETRIES")
+UPLOAD_RETRY_DELAY_BASE = cfg_int("UPLOAD", "UPLOAD_RETRY_DELAY_BASE")
+
+TASK_QUEUE_SIZE = cfg_int("UPLOAD", "TASK_QUEUE_SIZE")
+RESULT_QUEUE_SIZE = cfg_int("UPLOAD", "RESULT_QUEUE_SIZE")
+
+CAMERA_ASPECT_RATIOS = {}
+
+for camera, value in config["CAMERA_ASPECT_RATIO"].items():
+    min_ratio, max_ratio = map(float, value.split(","))
+    CAMERA_ASPECT_RATIOS[camera] = (min_ratio, max_ratio)
+    
 CAMERA_MIN_AREA = {
-    'Gate': 1100,
-    'Center': 1100,
-    'Entrance': 1100,
-    'Garage': 1100,
-    'Behind': 1100,
-    'Left': 1100
-}
+    camera: int(value)
+    for camera, value in config["CAMERA_MIN_AREA"].items()
+}    
 
 CAMERA_MAX_AREA = {
-    'Gate': 30000,
-    'Center': 30000,
-    'Entrance': 45000,
-    'Garage': 45000,
-    'Behind': 25000,
-    'Left': 25000,
+    camera: int(value)
+    for camera, value in config["CAMERA_MAX_AREA"].items()
 }
+    
+    
 
 # ==========================================
 # REJECTED IMAGES FUNCTIONS
@@ -286,6 +304,16 @@ WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change-this-default-secret")
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;5000000"
 
 # ==========================================
+# EMAIL ALERT CONFIGURATION
+# ==========================================
+SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASS = os.getenv("SMTP_PASS")
+ALERT_TO   = os.getenv("ALERT_TO")
+ENABLE_EMAIL_ALERTS = bool(SMTP_USER and SMTP_PASS and ALERT_TO)
+
+# ==========================================
 # CAMERA NODES
 # ==========================================
 NODES = {
@@ -428,7 +456,6 @@ def upload_task(camera_name, url, image_buffer, ts, current_count, max_images, d
                 break
 
 def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_images, detection_id):
-    # FIXED: Removed dead code - only use working_frame
     working_frame = frame.copy()
     yellow = (0, 255, 255)
 
@@ -455,6 +482,41 @@ def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_
         upload_executor.submit(upload_wrapper, camera_name, url, buffer.tobytes(), ts, current_count, max_images, detection_id)
 
 # ==========================================
+# EMAIL ALERT
+# ==========================================
+def send_email_alert(camera_name, detection_id, frame_num, max_frames, confidence, frame=None):
+    if not ENABLE_EMAIL_ALERTS:
+        return
+    try:
+        msg = MIMEMultipart()
+        msg['From']    = SMTP_USER
+        msg['To']      = ALERT_TO
+        msg['Subject'] = f"🚨 CCTV Alert: Person detected on {camera_name}"
+
+        body = (
+            f"<b>Camera:</b> {camera_name}<br>"
+            f"<b>Session:</b> {detection_id}<br>"
+            f"<b>Frame:</b> {frame_num}/{max_frames}<br>"
+            f"<b>Confidence:</b> {confidence:.0%}<br>"
+            f"<b>Time:</b> {time.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        msg.attach(MIMEText(body, 'html'))
+
+        if frame is not None:
+            success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+            if success:
+                img = MIMEImage(buffer.tobytes(), name=f"{camera_name}_{detection_id}_{frame_num}.jpg")
+                msg.attach(img)
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+
+    except Exception as e:
+        print(f"[ERROR] Email alert failed for {camera_name}: {e}")
+
+# ==========================================
 # YOLO WORKER PROCESS
 # ==========================================
 def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, max_aspect_ratio,
@@ -462,12 +524,19 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                         camera_max_area_dict, camera_aspect_ratios_dict, yolo_iou, debug_log_interval):
 
     import threading
-    # Separate timers for each filter type (prevents cross-filter suppression)
+    # Separate timers for debug logs (prevents cross-filter suppression)
     _last_area_log_time = {}          # Area too small
     _last_maxarea_log_time = {}       # Area too large (headlights, vehicles)
     _last_aspect_log_time = {}        # Bad aspect ratio
     _last_topedge_log_time = {}       # Top-edge rejection
     _last_topedge_accept_log_time = {} # Top-edge acceptance
+
+    # NEW: Separate timers for image saving (rate-limited)
+    _last_area_save_time = {}          # Area too small save timer
+    _last_maxarea_save_time = {}       # Area too large save timer
+    _last_aspect_save_time = {}        # Bad aspect ratio save timer
+    _last_topedge_save_time = {}       # Top-edge rejection save timer
+
     _log_lock = threading.Lock()
 
     def is_valid_person_detection_worker(camera_name, box, confidence, image_height, frame_id=None, original_frame=None):
@@ -491,9 +560,14 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                     msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: Area too small ({area}px < {min_area}px) - box: {width}x{height}px REJECTED!"
                     print(msg)
 
+            # Rate-limited image saving
             if original_frame is not None and SAVE_REJECTED_IMAGES:
-                save_rejected_image(camera_name, original_frame, box, confidence, "area",
-                                  area=area, min_value=min_area)
+                now = time.time()
+                last_save = _last_area_save_time.get(camera_name, 0)
+                if now - last_save >= SAVE_IMAGE_INTERVAL:
+                    _last_area_save_time[camera_name] = now
+                    save_rejected_image(camera_name, original_frame, box, confidence, "area",
+                                      area=area, min_value=min_area)
             return False
 
         # ==========================================
@@ -502,16 +576,20 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
         if max_area is not None and area > max_area:
             with _log_lock:
                 now = time.time()
-                # FIXED: Use separate _last_maxarea_log_time dictionary
                 last_time = _last_maxarea_log_time.get(camera_name, 0)
                 if now - last_time >= debug_log_interval:
                     _last_maxarea_log_time[camera_name] = now
                     msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: Area too large ({area}px > {max_area}px) - box: {width}x{height}px conf={confidence:.2f} REJECTED!"
                     print(msg)
 
+            # Rate-limited image saving
             if original_frame is not None and SAVE_REJECTED_IMAGES:
-                save_rejected_image(camera_name, original_frame, box, confidence, "area_too_large",
-                                  area=area, min_value=max_area)
+                now = time.time()
+                last_save = _last_maxarea_save_time.get(camera_name, 0)
+                if now - last_save >= SAVE_IMAGE_INTERVAL:
+                    _last_maxarea_save_time[camera_name] = now
+                    save_rejected_image(camera_name, original_frame, box, confidence, "area_too_large",
+                                      area=area, min_value=max_area)
             return False
 
         # ==========================================
@@ -528,9 +606,14 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                         msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: Bad aspect ratio ({aspect_ratio:.2f}) - box: {width}x{height}px conf={confidence:.2f} REJECTED!"
                         print(msg)
 
+                # Rate-limited image saving
                 if original_frame is not None and SAVE_REJECTED_IMAGES:
-                    save_rejected_image(camera_name, original_frame, box, confidence, "aspect",
-                                      aspect_ratio=aspect_ratio)
+                    now = time.time()
+                    last_save = _last_aspect_save_time.get(camera_name, 0)
+                    if now - last_save >= SAVE_IMAGE_INTERVAL:
+                        _last_aspect_save_time[camera_name] = now
+                        save_rejected_image(camera_name, original_frame, box, confidence, "aspect",
+                                          aspect_ratio=aspect_ratio)
                 return False
 
         # ==========================================
@@ -548,9 +631,14 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                             msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: Top-edge rejection - y1={top_y}, conf={confidence:.2f}<{TOP_EDGE_HIGH_CONF} REJECTED!"
                             print(msg)
 
+                    # Rate-limited image saving
                     if original_frame is not None and SAVE_REJECTED_IMAGES:
-                        save_rejected_image(camera_name, original_frame, box, confidence, "top_edge",
-                                          top_y=top_y, min_conf=TOP_EDGE_HIGH_CONF)
+                        now = time.time()
+                        last_save = _last_topedge_save_time.get(camera_name, 0)
+                        if now - last_save >= SAVE_IMAGE_INTERVAL:
+                            _last_topedge_save_time[camera_name] = now
+                            save_rejected_image(camera_name, original_frame, box, confidence, "top_edge",
+                                              top_y=top_y, min_conf=TOP_EDGE_HIGH_CONF)
                     return False
                 else:
                     with _log_lock:
@@ -815,6 +903,7 @@ if __name__ == "__main__":
     print(f"MAX_AREA_FILTER: Enabled (per-camera thresholds)")
     print(f"DEBUG_LOG_INTERVAL: {DEBUG_LOG_INTERVAL}s")
     print(f"ENABLE_DEBUG_PRINTS: {ENABLE_DEBUG_PRINTS}")
+    print(f"SAVE_IMAGE_INTERVAL: {SAVE_IMAGE_INTERVAL}s (rate-limited image saving)")
     print("=" * 60)
 
     threading.Thread(target=session_watchdog, daemon=True).start()
@@ -885,6 +974,12 @@ if __name__ == "__main__":
                 if frame is not None:
                     draw_and_upload(name, NODES[name]["rpi_url"], frame, detections, ts,
                                   current_count, MAX_IMAGES, detection_id)
+                    # Send email alert (non-blocking)
+                    conf = detections[0]['conf'] if detections else 0
+                    upload_executor.submit(
+                        send_email_alert,
+                        name, detection_id, current_count, MAX_IMAGES, conf, frame.copy()
+                    )
 
                 with state.lock:
                     state.last_upload = now
