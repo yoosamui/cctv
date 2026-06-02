@@ -93,17 +93,32 @@ Benefits:
 | Cat at 5m | 40×40px | 1,600px | ❌ REJECTED | Too small (animal) |
 
 **Configuration example:**
-```python
+```python 
+
+# ==========================================
+# CAMERA-SPECIFIC MIN/MAX AREA THRESHOLDS
+# ==========================================
 CAMERA_MIN_AREA = {
-    'Gate': 450,      # Reject anything smaller than 450px
-    'Center': 500,    # Stricter for Center camera
-    'Garage': 300,    # More permissive (can see people far away)
+    'Gate': 780,          # Reject anything smaller than 780px
+    'Center': 780,
+    'Entrance': 780,
+    'Garage': 780,
+    'Behind': 780,
+    'Left': 780
 }
 
 CAMERA_MAX_AREA = {
-    'Gate': 30000,    # Reject anything larger than 30,000px
-    'Garage': 45000,  # Allow closer people (up to 45,000px)
+    'Gate': 30000,          # Reject anything larger than 30,000px
+    'Center': 30000,
+    'Entrance': 45000,      # Allow closer people (up to 45,000px)
+    'Garage': 45000,
+    'Behind': 25000,
+    'Left': 25000,
 }
+
+
+
+
 ```
 
 ---
