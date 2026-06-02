@@ -490,16 +490,18 @@ Session ID lifecycle:
 | `POST_RESET_COOLDOWN` | Merged into `COOLDOWN` | Legacy parameter retained for documentation purposes. |
 
 **Example: Complete Walk-through**
-```
+
 A person walks past the Garage camera:
-Time	Event	                    State Change	          Details
-0s	Person detected	          IDLE → ACTIVE	          New session ae3a2d65, frame 1/3 sent
-3s	Person still visible	ACTIVE	                    Frame 2/3 sent
-6s	Person still visible	ACTIVE	                    Frame 3/3 sent → State → WAITING_RESET
-6s - 60s	Recorder processes images	WAITING_RESET	          System waits for webhook
-60s	Recorder sends reset	WAITING_RESET → COMPLETED	Webhook received
-65s	Auto-cleanup	          COMPLETED → IDLE	          Ready for next detection
-```
+
+| Time | Event | State Change | Details |
+|------|-------|-------------|---------|
+| 0s | Person detected | `IDLE → ACTIVE` | New session `ae3a2d65`, frame `1/3` sent |
+| 3s | Person still visible | `ACTIVE` | Frame `2/3` sent |
+| 6s | Person still visible | `ACTIVE → WAITING_RESET` | Frame `3/3` sent |
+| 6s - 60s | Recorder processes images | `WAITING_RESET` | System waits for webhook |
+| 60s | Recorder sends reset | `WAITING_RESET → COMPLETED` | Webhook received |
+| 65s | Auto-cleanup | `COMPLETED → IDLE` | Ready for next detection |
+
 
 **What happens if the recorder never sends reset?**
 
@@ -512,40 +514,83 @@ This transitions WAITING_RESET → IDLE, freeing the camera for new detections.
 
 **Race Condition Protection**
 The system includes safeguards against timing issues:
-```
-Protection	Method
-Duplicate resets	RESET_DEDUP_WINDOW ignores resets within 2 seconds
-Upload race	Re-checks session ID inside lock after HTTP request
-Stale frames	Validates detection_id matches current session before state change
-```
+| Protection | Method |
+|------------|--------|
+| Duplicate resets | `RESET_DEDUP_WINDOW` ignores resets received within 2 seconds. |
+| Upload race | Re-checks the session ID inside the lock after the HTTP request completes. |
+| Stale frames | Validates that `detection_id` matches the current active session before any state change. |
+
+
 **Why This Design?**
-```
-Requirement	          Solution
-Avoid false positives	Requires 3 consecutive detections of same person
-Handle people leaving early	Partial session cleanup (1/3 or 2/3 frames)
-Allow asynchronous processing	WAITING_RESET state decouples detection from recorder
-Prevent session mixing	Unique SID per session
-Recover from failures	Watchdog timers force reset stuck sessions
-Debuggability	          Every state change logged with SID
-```
+
+| Requirement | Solution |
+|-------------|----------|
+| Avoid false positives | Requires 3 consecutive detections of the same person. |
+| Handle people leaving early | Partial session cleanup (1/3 or 2/3 frames). |
+| Allow asynchronous processing | `WAITING_RESET` state decouples detection from recorder processing. |
+| Prevent session mixing | Unique Session ID (SID) assigned to every session. |
+| Recover from failures | Watchdog timers automatically reset stuck sessions. |
+| Debuggability | Every state transition is logged with the associated SID. |
 
 This state machine ensures reliable, traceable, and robust person detection across multiple cameras.
 
 
-
-
 ### Hardware Performance Numbers
-<img width="928" height="453" alt="image" src="https://github.com/user-attachments/assets/476da0e4-90c2-4bfe-8f0e-2ccff9984515" />
-Key Takeaway: The single most important factor is your hardware. If you are using a Raspberry Pi 5, your current setup is likely already running much faster than the 200ms range due to the Pi 5's significantly improved CPU and RAM bandwidth.
+## System Performance Snapshot
+
+| Metric | Value | Notes |
+|--------|-------|------|
+| CPU Temperature | `60.4°C` | Safe operating temperature for Raspberry Pi 5 |
+| Total CPU Usage | `68.6%` of one core | Combined usage from detector processes |
+| Total Memory Usage | `4%` | Very low RAM utilization |
+| System Uptime | `5 days, 22 hours` | Stable long-term operation |
+| Load Average (1m) | `0.72` | Low system load |
+| Load Average (5m) | `1.75` | Moderate sustained load |
+| Load Average (15m) | `1.92` | Stable multi-process workload |
+| Total RAM | `8062.4 MiB` | Raspberry Pi 5 (8GB) |
+| Free RAM | `5901.2 MiB` | Large memory headroom remaining |
+| Used RAM | `562.0 MiB` | Actual application memory usage |
+| Buff/Cache | `1712.6 MiB` | Linux filesystem cache |
+| Available RAM | `7500.3 MiB` | Memory still available to applications |
+| Swap Usage | `0.0 MiB / 2048 MiB` | No swap pressure |
+| Total Tasks | `177` | System processes |
+| Running Tasks | `1` | Most services idle/waiting |
+| Sleeping Tasks | `176` | Normal Linux behavior |
+
+---
+
+## Detector Process Usage
+
+| PID | Process | CPU Usage | RAM Usage | Resident Memory | Runtime |
+|-----|---------|-----------|-----------|----------------|---------|
+| `1678671` | `python3` | `51.7%` | `1.6%` | `129072 KiB` | `1:17.53` |
+| `1678663` | `python3` | `19.0%` | `2.2%` | `184240 KiB` | `0:30.27` |
+
+---
+
+## Key Takeaways
+
+- ✅ CPU temperature remains within safe limits
+- ✅ Memory usage is extremely low for a 6-camera AI system
+- ✅ No swap usage indicates healthy RAM availability
+- ✅ System load remains stable during inference
+- ✅ Suitable for continuous 24/7 operation
+- ✅ Enough remaining resources for additional services or cameras
+
+The single most important factor is your hardware. If you are using a Raspberry Pi 5, the current setup 
+is likely already running much faster than the 200ms range due to the Pi 5's significantly improved CPU and RAM bandwidth.
 
 
-* **Performance Estimates for Your Setup**
-Hardware	       Model & Format	            Input Size	       Reported Inference Time
-Raspberry Pi 4	YOLOv8n (Optimized)              640px	              ~170 ms
-Raspberry Pi 4	YOLOv8n (Standard ONNX)          640px	              ~173 ms
-Raspberry Pi 4	YOLOv8n (Standard)               640px	              ~240 ms
-Raspberry Pi 5	YOLOv8n (ONNX + Optimization)    480px (Estimate)	~78 ms
-Raspberry Pi 5	YOLOv8n (ONNX)                   640px	              ~85 ms        
+* **Performance Estimates**
+
+| Hardware           | Model & Format                    | Input Size | Inference Time |
+| ------------------ | --------------------------------- | ---------- | -------------- |
+| Raspberry Pi 4     | YOLOv8n (Optimized)               | 640px      | ~170 ms        |
+| Raspberry Pi 4     | YOLOv8n (Standard ONNX)           | 640px      | ~173 ms        |
+| Raspberry Pi 4     | YOLOv8n (Standard)                | 640px      | ~240 ms        |
+| **Raspberry Pi 5** | **YOLOv8n (ONNX + Optimization)** | **480px**  | **~78 ms**     |
+| Raspberry Pi 5     | YOLOv8n (ONNX)                    | 640px      | ~85 ms         |
+
 
 The default specific configuration is well-tuned for performance:
 
@@ -671,7 +716,7 @@ python3 -c "import cv2, onnxruntime, flask; print('✅ System dependencies verif
 Distributed under the MIT License. See `LICENSE` for more information.
 current version: 3.24.6
 
-```
+
 ## Roadmap
 
 Planned future improvements:
@@ -685,7 +730,7 @@ Planned future improvements:
 - Multi-site federation support
 
 Contributions and suggestions are welcome.
-```
+
 
 
 
