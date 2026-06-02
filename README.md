@@ -10,12 +10,25 @@ The system splits the workload across a cluster of Raspberry Pis. 6 IP cameras r
 
 ```text
 
-       [STORAGE RECORDER NETWORK]
-       
- (Center)  (Gate)  (Entrance) (Garage)  (Behind)   (Left)    [Detector]
-  [RPi4]    [RPi4]    [RPi4]    [RPi4]    [RPi4]    [RPi4]     *[RPi5]
-    |         |         |         |         |         |          |
-   CAM       CAM       CAM       CAM       CAM       CAM      ALL CAMS
+          IP CAMERAS
+      /     |     |     \
+     /      |     |      \
+
++---------+ +---------+ +---------+
+| RPi4 #1 | | RPi4 #2 | | RPi4 #3 |
+| Recorder| | Recorder| | Recorder|
++---------+ +---------+ +---------+
+
+        HTTP/Webhooks
+
+              ↓
+
+      +----------------+
+      | Raspberry Pi 5 |
+      | YOLO Detector  |
+      +----------------+
+
+           RTSP Pull
 
 ```
 
@@ -35,12 +48,13 @@ The system splits the workload across a cluster of Raspberry Pis. 6 IP cameras r
 
 ### 1. Multi-Camera Real-Time Detection with Smart Filtering
 
-Processes up to 10 cameras simultaneously, running YOLOv8n person detection on each frame at configurable intervals (default: every 3 seconds). To eliminate false positives from weather, animals, and shadows, it uses a powerful three-layer filtering system:
+Processes up to 6 cameras simultaneously, running YOLOv8n person detection on each frame at configurable intervals (default: every 3 seconds). To eliminate false positives from weather, animals, and shadows, it uses a powerful three-layer filtering system:
 
-Here's the complete description of your **three-layer filtering system**:
+Here's the complete description of the **three-layer filtering system**:
 
 * **Example rejected False Positive**
-<img width="640" height="360" alt="2026-06-02_145615 __ DEBUG _Center-_Area_too_large_(37170px_ _30000px)_-_box-_315x118px_conf=0 58_REJECTED" src="https://github.com/user-attachments/assets/54950157-32b2-48c0-aac9-8e5f9ba52421" />
+
+<img width="1096" height="309" alt="image" src="https://github.com/user-attachments/assets/18ed7f4b-d03d-4862-adb8-0b6a31320837" />
 
 ---
 
@@ -48,6 +62,16 @@ Here's the complete description of your **three-layer filtering system**:
 
 To eliminate false positives from weather, animals, shadows, and vehicle headlights, the system uses a powerful three-layer filtering system. Each camera can have **independent thresholds** tuned to its specific location and angle.
 
+## Low-Latency Frame Strategy
+The detector never queues video frames.
+Each camera thread always keeps only the most recent frame.
+
+Benefits:
+
+- Constant memory usage
+- No backlog growth
+- No increasing detection delay
+- Real-time behavior even under heavy CPU load
 ---
 
 ### Filter 1: Area Filter
@@ -106,10 +130,12 @@ CAMERA_MAX_AREA = {
 **Configuration example:**
 ```python
 CAMERA_ASPECT_RATIOS = {
-    'Gate': (1.4, 4.0),     # Strict: person must be at least 40% taller than wide
-    'Left': (0.85, 4.0),    # Permissive: allows sitting or crouching people
-    'Behind': (0.6, 4.0),   # Very permissive: high-mounted camera angle
-}
+    'Gate': (1.2, 4.0),
+    'Center': (1.2, 4.0),
+    'Entrance': (1.2, 4.0),
+    'Garage': (1.2, 4.0),
+    'Behind': (1.2, 4.0),
+    'Left': (1.2, 4.0)
 ```
 
 **Special case - Left camera:** Mounted high, looking down. People appear wider than tall (ratio ~0.85). Minimum set to 0.85 to accept real people while still rejecting cars (0.4-0.6).
@@ -135,7 +161,7 @@ CAMERA_ASPECT_RATIOS = {
 
 **Configuration:**
 ```python
-TOP_EDGE_MARGIN = 20           # Consider any detection with y1 <= 20px as "airborne"
+TOP_EDGE_MARGIN = 30           # Consider any detection with y1 <= 30px as "airborne"
 TOP_EDGE_HIGH_CONF = 0.75      # Require 75% confidence to keep top-edge detections
 ```
 
@@ -245,7 +271,61 @@ Running YOLOv8n on edge devices requires aggressive performance optimizations:
 | **Communication**      | REST API + Webhooks                                                       |
 | **Hardware Targets**   | Raspberry Pi 5 (Detector), Raspberry Pi 4B (Recorders)                    |
 
----
+
+## Session State Machine
+
+The code has a fairly sophisticated state machine:
+
+```bash
+IDLE
+ ↓
+Person Detected
+ ↓
+ACTIVE
+ ↓
+3 Frames Uploaded
+ ↓
+WAITING_RESET
+ ↓
+Recorder Confirms
+ ↓
+COMPLETED
+ ↓
+Cooldown
+ ↓
+IDLE
+
+```
+This is actually one of the strongest parts of the system.
+
+### Hardware Performance Numbers
+<img width="928" height="453" alt="image" src="https://github.com/user-attachments/assets/476da0e4-90c2-4bfe-8f0e-2ccff9984515" />
+Key Takeaway: The single most important factor is your hardware. If you are using a Raspberry Pi 5, your current setup is likely already running much faster than the 200ms range due to the Pi 5's significantly improved CPU and RAM bandwidth.
+
+
+* **Performance Estimates for Your Setup**
+Hardware	       Model & Format	            Input Size	       Reported Inference Time
+Raspberry Pi 4	YOLOv8n (Optimized)              640px	              ~170 ms
+Raspberry Pi 4	YOLOv8n (Standard ONNX)          640px	              ~173 ms
+Raspberry Pi 4	YOLOv8n (Standard)               640px	              ~240 ms
+Raspberry Pi 5	YOLOv8n (ONNX + Optimization)    480px (Estimate)	~78 ms
+Raspberry Pi 5	YOLOv8n (ONNX)                   640px	              ~85 ms        
+
+The default specific configuration is well-tuned for performance:
+
+Input Size (480px): You are using YOLO_INPUT_SIZE = 480. This is significantly smaller than the standard 640px used in many benchmarks. 
+Since the model processes fewer pixels, your inference time is likely lower than the standard benchmarks listed above.
+
+Model Format (ONNX): ONNX Runtime is highly optimized for ARM CPUs like the one in the Pi, making it generally much faster than running the raw PyTorch model
+
+Multi-tasking Overhead: Remember that your total latency includes not just inference, but also:
+
+    Pre-processing: Resizing the image (which you have optimized).
+    Post-processing: NMS (Non-Maximum Suppression) to filter overlapping boxes 
+    Capture Time: Fetching the frame from the RTSP stream.
+
+
+
 
 ## Getting Started
 
@@ -293,6 +373,8 @@ pip install --upgrade pip
 pip install numpy==1.26.4
 pip install opencv-python onnxruntime ultralytics flask requests python-dotenv
 
+Ultralytics is required only to export YOLOv8 models to ONNX.
+The detector itself runs entirely on ONNX Runtime.
 ```
 
 #### 3. Model Weights Deployment
@@ -342,6 +424,11 @@ python3 -c "import cv2, onnxruntime, flask; print('✅ System dependencies verif
 
 
 ---
+### Footage
+
+<img width="652" height="514" alt="image" src="https://github.com/user-attachments/assets/40604a3e-3ece-4447-b4f3-6e8b7bb77040" />
+
+
 
 ## License
 
@@ -349,7 +436,7 @@ Distributed under the MIT License. See `LICENSE` for more information.
 current version: 3.24.6
 
 ```
-
+TO BE CONTINUE
 ```
 
 
