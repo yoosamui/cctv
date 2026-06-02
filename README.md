@@ -27,7 +27,7 @@ The system splits the workload across a cluster of Raspberry Pis. 6 IP cameras r
 
 ### 1. Multi-Camera Real-Time Detection with Smart Filtering
 
-Processes up to 6 cameras simultaneously, running YOLOv8n person detection on each frame at configurable intervals (default: every 2.5 seconds). To eliminate false positives from weather, animals, and shadows, it uses a powerful three-layer filtering system:
+Processes up to 10 cameras simultaneously, running YOLOv8n person detection on each frame at configurable intervals (default: every 3 seconds). To eliminate false positives from weather, animals, and shadows, it uses a powerful three-layer filtering system:
 
 Here's the complete description of your **three-layer filtering system**:
 
@@ -183,7 +183,7 @@ Optionally, rejected images can be saved to disk for visual inspection:
 /home/pi/cctv_rejected/[2026-06-01_191651]__[DEBUG]_Left-_Bad_aspect_ratio_(0.60)-_REJECTED.jpg
 ```
 
-This allows fine-tuning of thresholds based on actual false positives in your specific environment. 🎯
+This allows fine-tuning of thresholds based on actual false positives in your specific environment. 
 
 ### 2. Asynchronous Session Management & Webhooks
 
