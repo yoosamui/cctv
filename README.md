@@ -416,19 +416,6 @@ Behavior:
 | WAITING_RESET	     | IDLE		| Watchdog force reset (stuck for WATCHDOG_TIMEOUT seconds)  |
 
 
-
-| Component              | Technology                                                                |
-| ---------------------- | ------------------------------------------------------------------------- |
-| **Detection Engine**   | YOLOv8n with ONNX Runtime                                                 |
-| **Video Capture**      | OpenCV with FFmpeg (RTSP over TCP)                                        |
-| **Web Server**         | Flask (Webhook Receiver Engine)                                           |
-| **Concurrency**        | Multiprocessing (YOLO), Threading (Streams), ThreadPoolExecutor (Uploads) |
-| **Communication**      | REST API + Webhooks                                                       |
-| **Hardware Targets**   | Raspberry Pi 5 (Detector), Raspberry Pi 4B (Recorders)                    |
-
-
-
-
 This is actually one of the strongest parts of the system.
 
 ### Session ID Management
