@@ -1,3 +1,5 @@
+IN PROGRESS...Taking place; under way...
+
 # Raspberry Pi Multi-Camera CCTV Recorder & Person Detector
 
 An intelligent, decentralized, edge-AI CCTV detection system optimized for low-resource hardware. It continuously captures 24/7 video feeds via RTSP and triggers intelligent, filtered YOLOv8 person detection completely locally—no cloud costs, no privacy concerns.
