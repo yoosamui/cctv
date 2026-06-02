@@ -4,13 +4,11 @@ An intelligent, decentralized, edge-AI CCTV detection system optimized for low-r
 
 ---
 
-## Architecture Overview
+## Architecture Overview Eample
 
 The system splits the workload across a cluster of Raspberry Pis. 6 IP cameras record 24/7 continuously to dedicated storage, while a Raspberry Pi 5 handles real-time machine learning inference, communicating asynchronously back to the recorders via webhooks.
 
 ```text
-
-**Example:**
 
        [STORAGE RECORDER NETWORK]
        
@@ -24,6 +22,11 @@ The system splits the workload across a cluster of Raspberry Pis. 6 IP cameras r
 * **Continuous Recording:** Six Raspberry Pi 4B nodes continuously save 5-minute video segments 24/7 to ensure zero data loss.
 * **Smart Detection:** A central Raspberry Pi 5 pulls live frames, processes them through an optimized YOLOv8 engine, and pushes annotated JPEG alerts back to the respective RPi4 recorder when a person is detected.
 
+
+* **Example Detection**
+<img width="640" height="360" alt="2026-06-02_10-42-24_Gate_DETECTION_e392498d_2026-06-02_10-42-45-374" src="https://github.com/user-attachments/assets/eefa04ea-ed95-471f-ac3b-358efb0862eb" />
+
+
 ---
 
 ## Features
@@ -33,6 +36,9 @@ The system splits the workload across a cluster of Raspberry Pis. 6 IP cameras r
 Processes up to 10 cameras simultaneously, running YOLOv8n person detection on each frame at configurable intervals (default: every 3 seconds). To eliminate false positives from weather, animals, and shadows, it uses a powerful three-layer filtering system:
 
 Here's the complete description of your **three-layer filtering system**:
+
+* **Example rejected False Positive**
+<img width="640" height="360" alt="2026-06-02_145615 __ DEBUG _Center-_Area_too_large_(37170px_ _30000px)_-_box-_315x118px_conf=0 58_REJECTED" src="https://github.com/user-attachments/assets/54950157-32b2-48c0-aac9-8e5f9ba52421" />
 
 ---
 
@@ -147,7 +153,7 @@ When a detection occurs, filters run in this order:
 5. ALL FILTERS PASSED → Detection accepted → Session starts
 ```
 
-**Real example from your log:**
+**Real example from the log:**
 ```
 [2026-06-01 22:52:42] ❌ [DEBUG] Garage: Area too large (40261px > 30000px) - box: 163x247px conf=0.66 REJECTED!
 ```
@@ -160,14 +166,14 @@ When a detection occurs, filters run in this order:
 
 ## Per-Camera Tuning Philosophy
 
-| Camera | Min Area | Max Area | Aspect Ratio | Why |
-|--------|----------|----------|--------------|-----|
-| **Gate** | 450 | 30,000 | (1.4, 4.0) | Strict - expects standing people |
-| **Center** | 500 | 30,000 | (1.5, 4.0) | Very strict - rejects most false positives |
-| **Entrance** | 300 | 25,000 | (1.2, 4.0) | Balanced - allows sitting people |
-| **Garage** | 300 | 45,000 | (1.2, 4.0) | Permissive - allows close-up people |
-| **Behind** | 400 | 25,000 | (0.6, 4.0) | High camera angle - people appear wider |
-| **Left** | 500 | 25,000 | (0.85, 4.0) | High camera angle - allows sitting/crouching |
+| Camera       | Min Area | Max Area | Aspect Ratio | Why |
+|--------------|----------|----------|--------------|-----|
+| **Gate**     | 450      | 30,000   | (1.4, 4.0)   | Strict - expects standing people |
+| **Center**   | 500      | 30,000   | (1.5, 4.0)   | Very strict - rejects most false positives |
+| **Entrance** | 300      | 25,000   | (1.2, 4.0)   | Balanced - allows sitting people |
+| **Garage**   | 300      | 45,000   | (1.2, 4.0)   | Permissive - allows close-up people |
+| **Behind**   | 400      | 25,000   | (0.6, 4.0)   | High camera angle - people appear wider |
+| **Left**     | 500      | 25,000   | (0.85, 4.0)  | High camera angle - allows sitting/crouching |
 
 ---
 
@@ -196,12 +202,12 @@ The system manages complete detection sessions and communicates seamlessly with 
 * **Frame Burst:** Captures up to 3 frames at ~3-second intervals (`1/3` ➔ `2/3` ➔ `3/3`) and streams them via HTTP POST.
 * **Webhook Resets:** Waits for a `POST /session-reset` confirmation from the recorder node before clearing the cooldown state.
 
-| Feature | Benefit |
-| --- | --- |
-| **Async Communication** | Detector uses an upload queue; never blocks the primary video capture thread. |
-| **Partial Session Cleanup** | If a person leaves early, the session auto-cleans without leaving ghost alerts. |
+| Feature                        | Benefit |
+| -------------------------------| -------------------------------------------------------------------------------------|
+| **Async Communication**        | Detector uses an upload queue; never blocks the primary video capture thread.        |
+| **Partial Session Cleanup**    | If a person leaves early, the session auto-cleans without leaving ghost alerts.      |
 | **Rate-Limited Deduplication** | Ignores duplicate reset signals within a 2-second window to prevent race conditions. |
-| **Watchdog Timers** | Force-resets stuck sessions automatically after 5 minutes. |
+| **Watchdog Timers**            | Force-resets stuck sessions automatically after 5 minutes.                           |
 
 ### 3. Hardware-Optimized for Raspberry Pi
 
@@ -228,14 +234,14 @@ Running YOLOv8n on edge devices requires aggressive performance optimizations:
 
 ## Tech Stack
 
-| Component | Technology |
-| --- | --- |
-| **Detection Engine** | YOLOv8n with ONNX Runtime |
-| **Video Capture** | OpenCV with FFmpeg (RTSP over TCP) |
-| **Web Server** | Flask (Webhook Receiver Engine) |
-| **Concurrency** | Multiprocessing (YOLO), Threading (Streams), ThreadPoolExecutor (Uploads) |
-| **Communication** | REST API + Webhooks |
-| **Hardware Targets** | Raspberry Pi 5 (Detector), Raspberry Pi 4B (Recorders) |
+| Component              | Technology                                                                |
+| ---------------------- | ------------------------------------------------------------------------- |
+| **Detection Engine**   | YOLOv8n with ONNX Runtime                                                 |
+| **Video Capture**      | OpenCV with FFmpeg (RTSP over TCP)                                        |
+| **Web Server**         | Flask (Webhook Receiver Engine)                                           |
+| **Concurrency**        | Multiprocessing (YOLO), Threading (Streams), ThreadPoolExecutor (Uploads) |
+| **Communication**      | REST API + Webhooks                                                       |
+| **Hardware Targets**   | Raspberry Pi 5 (Detector), Raspberry Pi 4B (Recorders)                    |
 
 ---
 
