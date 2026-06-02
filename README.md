@@ -23,8 +23,9 @@ The system splits the workload across a cluster of Raspberry Pis. 6 IP cameras r
 * **Smart Detection:** A central Raspberry Pi 5 pulls live frames, processes them through an optimized YOLOv8 engine, and pushes annotated JPEG alerts back to the respective RPi4 recorder when a person is detected.
 
 
-* **Example Detection**
-<img width="640" height="360" alt="2026-06-02_10-42-24_Gate_DETECTION_e392498d_2026-06-02_10-42-45-374" src="https://github.com/user-attachments/assets/eefa04ea-ed95-471f-ac3b-358efb0862eb" />
+* **Example Detections**
+<img width="663" height="127" alt="image" src="https://github.com/user-attachments/assets/2a67c5ce-a41c-40ac-96cf-fbe17a2067ac" />
+
 
 
 ---
