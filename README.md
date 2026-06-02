@@ -1,21 +1,54 @@
-### Project Status
+# Project Status
 
-Current Version: v3.24.6
+**Current Version:** `v3.24.6`
 
-This project is actively under development. Features, APIs, configuration parameters, and documentation may change between releases.
-
-# Raspberry Pi Multi-Camera CCTV Recorder & Person Detector
-
-An intelligent, decentralized, edge-AI CCTV detection system optimized for low-resource hardware. It continuously captures 24/7 video feeds via RTSP and triggers intelligent, filtered YOLOv8 person detection completely locally—no cloud costs, no privacy concerns.
+> This project is actively under development. Features, APIs, configuration parameters, and documentation may change between releases.
 
 ---
 
-## Architecture Overview Eample
+# Raspberry Pi Multi-Camera CCTV Recorder & Person Detector
 
-The system splits the workload across a cluster of Raspberry Pis. 6 IP cameras record 24/7 continuously to dedicated storage, while a Raspberry Pi 5 handles real-time machine learning inference, communicating asynchronously back to the recorders via webhooks.
+An intelligent, decentralized edge-AI CCTV detection system optimized for low-resource hardware.
+
+The platform continuously records RTSP camera streams 24/7 while performing real-time person detection using YOLOv8 entirely on local hardware.
+
+### Key Benefits
+
+* 🔒 100% local processing (no cloud services required)
+* 🎥 Continuous 24/7 recording
+* 👤 Real-time person detection
+* 🚫 Advanced false-positive filtering
+* ⚡ Optimized for Raspberry Pi hardware
+* 🔄 Asynchronous recorder/detector architecture
+* 📡 Multi-camera support (6 cameras tested)
+
+No subscription fees. No cloud dependency. No privacy concerns.
+
+---
+
+## At a Glance
+
+| Item              | Value                      |
+| ----------------- | -------------------------- |
+| Cameras Tested    | 6                          |
+| Detector          | YOLOv8n (ONNX Runtime)     |
+| Detector Hardware | Raspberry Pi 5             |
+| Recorder Hardware | Raspberry Pi 4B            |
+| Recording Mode    | Continuous 24/7            |
+| Detection Mode    | Real-Time Person Detection |
+| Alert Transport   | HTTP Webhooks              |
+| Storage           | Local                      |
+| Cloud Required    | No                         |
+
+---
+
+## Architecture Overview
+
+The system distributes workloads across a cluster of Raspberry Pis.
+
+Six Raspberry Pi 4B recorder nodes continuously save 5-minute video segments from IP cameras, while a Raspberry Pi 5 performs real-time AI inference and communicates asynchronously back to the recorders via webhooks.
 
 ```text
-
           IP CAMERAS
       /     |     |     \
      /      |     |      \
@@ -35,11 +68,27 @@ The system splits the workload across a cluster of Raspberry Pis. 6 IP cameras r
       +----------------+
 
            RTSP Pull
-
 ```
 
-* **Continuous Recording:** Six Raspberry Pi 4B nodes continuously save 5-minute video segments 24/7 to ensure zero data loss.
-* **Smart Detection:** A central Raspberry Pi 5 pulls live frames, processes them through an optimized YOLOv8 engine, and pushes annotated JPEG alerts back to the respective RPi4 recorder when a person is detected.
+### Recording Layer
+
+* Continuous 24/7 recording
+* 5-minute video segment rotation
+* Independent storage on each recorder node
+* No single point of failure
+
+### Detection Layer
+
+* Centralized YOLOv8n inference
+* Real-time RTSP frame acquisition
+* Advanced false-positive filtering
+* Session-based event tracking
+* Annotated JPEG alert generation
+
+### Example Detection
+
+<img width="1151" height="236" alt="image" src="https://github.com/user-attachments/assets/974b7523-e794-4ac5-9ae0-bf3148693916" />
+
 
 
 * **Example Detections**
@@ -441,15 +490,14 @@ Session ID lifecycle:
     Cleared when session completes or times out
 
 **Important Timers**
-```
-| Timer                 | Value               | Purpose                                                                 |
-|-----------------------|---------------------|-------------------------------------------------------------------------|
-| `COOLDOWN`            | 5.0 seconds         | Wait after a session ends before starting a new one (prevents rapid re-triggering). |
-| `SESSION_TIMEOUT`     | 300 seconds (5 min) | Force reset if no frames are received while in the `ACTIVE` state.      |
-| `WATCHDOG_TIMEOUT`    | 300 seconds (5 min) | Force reset if the system is stuck in the `WAITING_RESET` state.        |
-| `RESET_DEDUP_WINDOW`  | 2 seconds           | Ignore duplicate reset signals.                                         |
-| `POST_RESET_COOLDOWN` | Unified into `COOLDOWN` | Legacy setting; now replaced by `COOLDOWN`.                         |
-```
+
+| Timer | Value | Purpose |
+|--------|--------|----------|
+| `COOLDOWN` | 5 seconds | Wait after a session ends before allowing a new session. |
+| `SESSION_TIMEOUT` | 300 seconds (5 min) | Force reset if no frames are received while in `ACTIVE`. |
+| `WATCHDOG_TIMEOUT` | 300 seconds (5 min) | Force reset if stuck in `WAITING_RESET`. |
+| `RESET_DEDUP_WINDOW` | 2 seconds | Ignore duplicate reset signals. |
+| `POST_RESET_COOLDOWN` | Merged into `COOLDOWN` | Legacy parameter retained for documentation purposes. |
 
 **Example: Complete Walk-through**
 ```
@@ -634,7 +682,19 @@ Distributed under the MIT License. See `LICENSE` for more information.
 current version: 3.24.6
 
 ```
-TO BE CONTINUE
+## Roadmap
+
+Planned future improvements:
+
+- Coral TPU support
+- ONNX model benchmarking suite
+- Web dashboard for live camera status
+- Historical event search
+- Automatic recorder health monitoring
+- Docker deployment support
+- Multi-site federation support
+
+Contributions and suggestions are welcome.
 ```
 
 
