@@ -85,17 +85,9 @@ Six Raspberry Pi 4B recorder nodes continuously save 5-minute video segments fro
 * Session-based event tracking
 * Annotated JPEG alert generation
 
-### Example Detection
+**Example Detection**
 
 <img width="1151" height="236" alt="image" src="https://github.com/user-attachments/assets/974b7523-e794-4ac5-9ae0-bf3148693916" />
-
-
-
-* **Example Detections**
-
-<img width="1151" height="236" alt="image" src="https://github.com/user-attachments/assets/974b7523-e794-4ac5-9ae0-bf3148693916" />
-
-
 
 ---
 
@@ -174,9 +166,7 @@ CAMERA_MAX_AREA = {
 
 
 
-```
 
----
 
 ### Filter 2: Aspect Ratio Filter
 
