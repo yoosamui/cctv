@@ -1,4 +1,8 @@
-IN PROGRESS...Taking place; under way...
+### Project Status
+
+Current Version: v3.24.6
+
+This project is actively under development. Features, APIs, configuration parameters, and documentation may change between releases.
 
 # Raspberry Pi Multi-Camera CCTV Recorder & Person Detector
 
