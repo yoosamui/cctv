@@ -1,10 +1,10 @@
-# 🛡️ Raspberry Pi Multi-Camera CCTV Recorder & Person Detector
+# Raspberry Pi Multi-Camera CCTV Recorder & Person Detector
 
 An intelligent, decentralized, edge-AI CCTV detection system optimized for low-resource hardware. It continuously captures 24/7 video feeds via RTSP and triggers intelligent, filtered YOLOv8 person detection completely locally—no cloud costs, no privacy concerns.
 
 ---
 
-## 🏗️ Architecture Overview
+## Architecture Overview
 
 The system splits the workload across a cluster of Raspberry Pis. 6 IP cameras record 24/7 continuously to dedicated storage, while a Raspberry Pi 5 handles real-time machine learning inference, communicating asynchronously back to the recorders via webhooks.
 
@@ -23,23 +23,167 @@ The system splits the workload across a cluster of Raspberry Pis. 6 IP cameras r
 
 ---
 
-## 🚀 Features
+## Features
 
 ### 1. Multi-Camera Real-Time Detection with Smart Filtering
 
 Processes up to 6 cameras simultaneously, running YOLOv8n person detection on each frame at configurable intervals (default: every 2.5 seconds). To eliminate false positives from weather, animals, and shadows, it uses a powerful three-layer filtering system:
 
-| Filter | Purpose | Example |
-| --- | --- | --- |
-| **Area Filter** | Rejects detections that are too small (distant) or too large (headlights, vehicles close to camera). | A person at 50m might be 20x50px (1,000px) → **Rejected**;<br>
+Here's the complete description of your **three-layer filtering system**:
 
-<br>A headlight flash at 27,000px → **Rejected** |
-| **Aspect Ratio Filter** | Rejects detections with the wrong shape (cars, shadows, pets). | Car: 300x200px (ratio 0.67) → **Rejected**;<br>
+---
 
-<br>Person standing: 100x250px (ratio 2.5) → **Accepted** |
-| **Top-Edge Filter** | Rejects "airborne" false positives near the top of the frame (birds, drones, partial figures). | Bird at y=5px with low confidence → **Rejected** |
+## Three-Layer Filtering System
 
-> 💡 **Per-Camera Customization:** Each camera has independent thresholds, allowing fine-tuning per location (e.g., *Garage* accepts close-ups; *Center* strictly rejects cars).
+To eliminate false positives from weather, animals, shadows, and vehicle headlights, the system uses a powerful three-layer filtering system. Each camera can have **independent thresholds** tuned to its specific location and angle.
+
+---
+
+### Filter 1: Area Filter
+
+**Purpose:** Rejects detections that are too small (distant people, pets, birds) or too large (headlights, vehicles very close to camera, large shadows).
+
+**How it works:**
+- Calculates bounding box area: `width × height` (pixels)
+- Compares against `CAMERA_MIN_AREA` and `CAMERA_MAX_AREA` thresholds
+
+**Example:**
+
+| Scenario | Box Size | Area | Result | Reason |
+|----------|----------|------|--------|--------|
+| Person at 50m | 20×50px | 1,000px | ❌ REJECTED | Too small (distant) |
+| Person at 10m | 60×150px | 9,000px | ✅ ACCEPTED | Normal range |
+| Person very close | 160×250px | 40,000px | ✅ ACCEPTED | Normal (close-up) |
+| Vehicle headlight | 170×240px | 40,800px | ❌ REJECTED | Too large (false positive) |
+| Cat at 5m | 40×40px | 1,600px | ❌ REJECTED | Too small (animal) |
+
+**Configuration example:**
+```python
+CAMERA_MIN_AREA = {
+    'Gate': 450,      # Reject anything smaller than 450px
+    'Center': 500,    # Stricter for Center camera
+    'Garage': 300,    # More permissive (can see people far away)
+}
+
+CAMERA_MAX_AREA = {
+    'Gate': 30000,    # Reject anything larger than 30,000px
+    'Garage': 45000,  # Allow closer people (up to 45,000px)
+}
+```
+
+---
+
+### Filter 2: Aspect Ratio Filter
+
+**Purpose:** Rejects detections with the wrong shape. Real people are typically taller than wide (aspect ratio > 1.2), while false positives like cars, shadows, and animals are often wider than tall (aspect ratio < 1.0).
+
+**How it works:**
+- Calculates aspect ratio: `height ÷ width`
+- Compares against `CAMERA_ASPECT_RATIOS (min_ratio, max_ratio)`
+
+**Example:**
+
+| Object | Box Size | Aspect Ratio | Result | Reason |
+|--------|----------|--------------|--------|--------|
+| Standing person | 100×250px | 2.5 | ✅ ACCEPTED | Taller than wide |
+| Sitting person | 150×180px | 1.2 | ✅ ACCEPTED | Slightly taller |
+| Car (side view) | 300×120px | 0.4 | ❌ REJECTED | Much wider than tall |
+| Shadow | 200×80px | 0.4 | ❌ REJECTED | Much wider than tall |
+| Dog (side view) | 150×100px | 0.67 | ❌ REJECTED | Wider than tall |
+| Person crouching | 120×110px | 0.92 | ❌ REJECTED | Too wide (depends on camera) |
+
+**Configuration example:**
+```python
+CAMERA_ASPECT_RATIOS = {
+    'Gate': (1.4, 4.0),     # Strict: person must be at least 40% taller than wide
+    'Left': (0.85, 4.0),    # Permissive: allows sitting or crouching people
+    'Behind': (0.6, 4.0),   # Very permissive: high-mounted camera angle
+}
+```
+
+**Special case - Left camera:** Mounted high, looking down. People appear wider than tall (ratio ~0.85). Minimum set to 0.85 to accept real people while still rejecting cars (0.4-0.6).
+
+---
+
+### Filter 3: Top-Edge (Ground) Filter
+
+**Purpose:** Rejects "airborne" false positives that appear near the top edge of the frame, such as birds, drones, insects, or partial people walking into the top of frame.
+
+**How it works:**
+- Checks if the top of bounding box (`y1`) is within `TOP_EDGE_MARGIN` pixels of the top edge
+- If yes, requires confidence ≥ `TOP_EDGE_HIGH_CONF` to accept
+
+**Example:**
+
+| Scenario | y1 position | Confidence | Result | Reason |
+|----------|-------------|------------|--------|--------|
+| Bird flying | y1 = 5px | 0.45 | ❌ REJECTED | Top-edge + low confidence |
+| Bird flying | y1 = 5px | 0.85 | ✅ ACCEPTED | Top-edge + high confidence (rare) |
+| Person entering from top | y1 = 3px | 0.62 | ❌ REJECTED | Partial person (wait for full body) |
+| Normal person | y1 = 150px | 0.70 | ✅ ACCEPTED | Not near top edge |
+
+**Configuration:**
+```python
+TOP_EDGE_MARGIN = 20           # Consider any detection with y1 <= 20px as "airborne"
+TOP_EDGE_HIGH_CONF = 0.75      # Require 75% confidence to keep top-edge detections
+```
+
+**Why this matters:** Prevents false alerts from birds, drones, leaves, or insects flying close to the camera, while still allowing real people on elevated platforms (balconies, stairs) if they have high confidence.
+
+---
+
+## Filter Interaction Example
+
+When a detection occurs, filters run in this order:
+
+```
+1. AREA FILTER (too small?) → REJECT if area < min_area
+2. AREA FILTER (too large?) → REJECT if area > max_area  
+3. ASPECT RATIO FILTER → REJECT if ratio outside [min, max]
+4. TOP-EDGE FILTER → REJECT if y1 <= margin AND confidence < high_conf
+5. ALL FILTERS PASSED → Detection accepted → Session starts
+```
+
+**Real example from your log:**
+```
+[2026-06-01 22:52:42] ❌ [DEBUG] Garage: Area too large (40261px > 30000px) - box: 163x247px conf=0.66 REJECTED!
+```
+- Area filter caught this false positive (headlight/vehicle)
+- Aspect ratio (1.52) would have passed
+- Top-edge (y1 not near top) would have passed
+- **Area filter correctly rejected it**
+
+---
+
+## Per-Camera Tuning Philosophy
+
+| Camera | Min Area | Max Area | Aspect Ratio | Why |
+|--------|----------|----------|--------------|-----|
+| **Gate** | 450 | 30,000 | (1.4, 4.0) | Strict - expects standing people |
+| **Center** | 500 | 30,000 | (1.5, 4.0) | Very strict - rejects most false positives |
+| **Entrance** | 300 | 25,000 | (1.2, 4.0) | Balanced - allows sitting people |
+| **Garage** | 300 | 45,000 | (1.2, 4.0) | Permissive - allows close-up people |
+| **Behind** | 400 | 25,000 | (0.6, 4.0) | High camera angle - people appear wider |
+| **Left** | 500 | 25,000 | (0.85, 4.0) | High camera angle - allows sitting/crouching |
+
+---
+
+## Debugging Features
+
+When a detection is rejected, the system logs the exact reason with box dimensions:
+
+```
+❌ [DEBUG] Garage: Area too large (40261px > 30000px) - box: 163x247px conf=0.66 REJECTED!
+❌ [DEBUG] Center: Bad aspect ratio (0.38) - box: 312x118px conf=0.58 REJECTED!
+❌ [DEBUG] Left: Top-edge rejection - y1=5px, conf=0.45<0.75 REJECTED!
+```
+
+Optionally, rejected images can be saved to disk for visual inspection:
+```
+/home/pi/cctv_rejected/[2026-06-01_191651]__[DEBUG]_Left-_Bad_aspect_ratio_(0.60)-_REJECTED.jpg
+```
+
+This allows fine-tuning of thresholds based on actual false positives in your specific environment. 🎯
 
 ### 2. Asynchronous Session Management & Webhooks
 
@@ -79,7 +223,7 @@ Running YOLOv8n on edge devices requires aggressive performance optimizations:
 
 ---
 
-## 📦 Tech Stack
+## Tech Stack
 
 | Component | Technology |
 | --- | --- |
@@ -92,7 +236,7 @@ Running YOLOv8n on edge devices requires aggressive performance optimizations:
 
 ---
 
-## 🛠️ Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -171,7 +315,7 @@ WEBHOOK_SECRET="your_secure_webhook_key"
 
 ---
 
-### 🧪 Verification Checklist
+### Verification Checklist
 
 Verify your setup is functional by checking dependencies and model parameters before initialization:
 
@@ -188,9 +332,10 @@ python3 -c "import cv2, onnxruntime, flask; print('✅ System dependencies verif
 
 ---
 
-## 📄 License
+## License
 
 Distributed under the MIT License. See `LICENSE` for more information.
+current version: 3.24.6
 
 ```
 
