@@ -404,23 +404,11 @@ Behavior:
 [22:58:42] 📡 Recorder signaled: Garage reset - DETECTION RESUMED [SID:ae3a2d65]
 
 ```
-State Transitions Summary
+**State Transitions Summary**
 
 ```
+<img width="884" height="283" alt="image" src="https://github.com/user-attachments/assets/2f80dfc2-5226-46a0-b8d8-bc026b6a6add" />
 
-From                    To	                          Trigger
--------------------------------------------------------------------
-IDLE                   ACTIVE			Valid person detection + cooldown passed
--------------------------------------------------------------------
-ACTIVE                 WAITING_RESET		3 frames sent to recorder
--------------------------------------------------------------------
-WAITING_RESET          COMPLETED		Recorder sends /session-reset webhook
--------------------------------------------------------------------
-COMPLETED              IDLE			5-second auto-cleanup
--------------------------------------------------------------------
-ACTIVE		   IDLE			Session timeout (no activity for SESSION_TIMEOUT seconds)
--------------------------------------------------------------------
-WAITING_RESET	   IDLE			Watchdog force reset (stuck for WATCHDOG_TIMEOUT seconds)
 
 ```
 
