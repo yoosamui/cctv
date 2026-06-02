@@ -406,11 +406,28 @@ Behavior:
 ```
 **State Transitions Summary**
 
-```
-<img width="884" height="283" alt="image" src="https://github.com/user-attachments/assets/2f80dfc2-5226-46a0-b8d8-bc026b6a6add" />
+| From                   | To	                    | Trigger
+|------------------------|------------------------|------------------------------------------------------------|
+| IDLE                   | ACTIVE		| Valid person detection + cooldown passed                   |
+| ACTIVE                 | WAITING_RESET	| 3 frames sent to recorder                                  |
+| WAITING_RESET	     | COMPLETED		| Recorder sends /session-reset webhook                      | 
+| COMPLETED	     | IDLE		| 5-second auto-cleanup                                      |
+| ACTIVE		     | IDLE		| Session timeout (no activity for SESSION_TIMEOUT seconds)  |
+| WAITING_RESET	     | IDLE		| Watchdog force reset (stuck for WATCHDOG_TIMEOUT seconds)  |
 
 
-```
+
+| Component              | Technology                                                                |
+| ---------------------- | ------------------------------------------------------------------------- |
+| **Detection Engine**   | YOLOv8n with ONNX Runtime                                                 |
+| **Video Capture**      | OpenCV with FFmpeg (RTSP over TCP)                                        |
+| **Web Server**         | Flask (Webhook Receiver Engine)                                           |
+| **Concurrency**        | Multiprocessing (YOLO), Threading (Streams), ThreadPoolExecutor (Uploads) |
+| **Communication**      | REST API + Webhooks                                                       |
+| **Hardware Targets**   | Raspberry Pi 5 (Detector), Raspberry Pi 4B (Recorders)                    |
+
+
+
 
 This is actually one of the strongest parts of the system.
 
