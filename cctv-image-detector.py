@@ -63,7 +63,7 @@ ANALYSIS_INTERVAL = 3               # controls how often YOLO analyzes a new fra
 MAX_IMAGES = 3                      # Number of frames to capture per detection session
 COOLDOWN = 5.0                      # Unified cooldown: seconds to wait after session ends or reset before starting new one
 CAM_THREAD_SLEEP = 0.05             # Seconds between camera frame capture attempts
-YOLO_CONFIDENCE = 0.25              # Minimum confidence score (0-1) - lower = more sensitive but more false positives
+YOLO_CONFIDENCE = 0.55              # Minimum confidence score (0-1) - lower = more sensitive but more false positives
 YOLO_INPUT_SIZE = 480               # Resize frames to 480x480 pixels before YOLO inference
 YOLO_IOU = 0.40                     # IoU threshold for Non-Maximum Suppression (overlap removal)
 JPEG_QUALITY = 80                   # JPEG compression quality (1-100, higher = better quality but larger files)
@@ -83,7 +83,7 @@ ENABLE_DEBUG_PRINTS = True     # set to False to disable debug logs
 # ==========================================
 # DEBUG - REJECTED IMAGES
 # ==========================================
-SAVE_REJECTED_IMAGES = False    # Save images rejected by filters for debugging
+SAVE_REJECTED_IMAGES = False   # Save images rejected by filters for debugging
 REJECTED_IMAGES_DIR = "/home/pi/cctv_rejected"
 MAX_REJECTED_IMAGES = 100      # Max number of rejected images to keep (rotates)
 
@@ -94,7 +94,7 @@ ENABLE_AREA_FILTER = True      # Too small? Probably not a person
 ENABLE_ASPECT_FILTER = True    # Wrong shape? Probably not a person
 
 # TOP-EDGE (GROUND) FILTER CONFIGURATION
-TOP_EDGE_MARGIN = 20           # Pixels from top edge considered "airborne" (suspicious)
+TOP_EDGE_MARGIN = 30           # Pixels from top edge considered "airborne" (suspicious)
 TOP_EDGE_HIGH_CONF = 0.75      # Minimum confidence required to keep top-edge detections
 ENABLE_TOP_EDGE_FILTER = True  # Enable/disable the top-edge ground filter
 
@@ -109,8 +109,8 @@ MAX_ASPECT_RATIO = 4.0
 # CAMERA-SPECIFIC ASPECT RATIO FILTERS
 # ==========================================
 CAMERA_ASPECT_RATIOS = {
-    'Gate': (1.4, 4.0),
-    'Center': (1.5, 4.0),
+    'Gate': (1.2, 4.0),
+    'Center': (1.2, 4.0),
     'Entrance': (1.2, 4.0),
     'Garage': (1.2, 4.0),
     'Behind': (1.2, 4.0),
@@ -121,12 +121,12 @@ CAMERA_ASPECT_RATIOS = {
 # CAMERA-SPECIFIC MIN/MAX AREA THRESHOLDS
 # ==========================================
 CAMERA_MIN_AREA = {
-    'Gate': 1100,
-    'Center': 1100,
-    'Entrance': 1100,
-    'Garage': 1100,
-    'Behind': 1100,
-    'Left': 1100
+    'Gate': 780,
+    'Center': 780,
+    'Entrance': 780,
+    'Garage': 780,
+    'Behind': 780,
+    'Left': 780
 }
 
 CAMERA_MAX_AREA = {
