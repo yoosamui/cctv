@@ -144,6 +144,10 @@ CAMERA_MAX_AREA = {
 
 **Configuration example:**
 ```python
+
+# ==========================================
+# CAMERA-SPECIFIC ASPECT RATIO FILTERS
+# ==========================================
 CAMERA_ASPECT_RATIOS = {
     'Gate': (1.2, 4.0),
     'Center': (1.2, 4.0),
@@ -151,6 +155,8 @@ CAMERA_ASPECT_RATIOS = {
     'Garage': (1.2, 4.0),
     'Behind': (1.2, 4.0),
     'Left': (1.2, 4.0)
+}
+
 ```
 
 **Special case - Left camera:** Mounted high, looking down. People appear wider than tall (ratio ~0.85). Minimum set to 0.85 to accept real people while still rejecting cars (0.4-0.6).
@@ -287,31 +293,201 @@ Running YOLOv8n on edge devices requires aggressive performance optimizations:
 | **Hardware Targets**   | Raspberry Pi 5 (Detector), Raspberry Pi 4B (Recorders)                    |
 
 
-## Session State Machine
+## Session State Machine Explained 
 
 The code has a fairly sophisticated state machine:
+The Session State Machine manages the lifecycle of each person detection from first sighting to completion. 
+Each camera has its own independent state machine.
 
+* **State Diagram**
+```
+                    ┌─────────────────────────────────────────┐
+                    │                                         │
+                    ▼                                         │
+    ┌─────────┐   Person    ┌──────────┐   Frame 3/3   ┌───────────────┐
+    │  IDLE   │ ──────────► │  ACTIVE  │ ────────────► │ WAITING_RESET │
+    └─────────┘             └──────────┘               └───────────────┘
+         ▲                       │                            │
+         │                       │                            │
+         │                   No more                          │
+         │                   frames                           │ Recorder
+         │                   (timeout)                        │ sends reset
+         │                       │                            │
+         │                       ▼                            ▼
+         │                  ┌────────────┐              ┌─────────────┐
+         └──────────────────│  COMPLETED │◄─────────────│   RESET     │
+                            └────────────┘   (auto)     │  RECEIVED   │
+                                                        └─────────────┘
+```
+**State 1: IDLE**
+
+Meaning: Camera is ready and waiting for a person to be detected.
+
+Conditions to enter:
+    System startup
+    After a session is completed and reset
+    After watchdog timeout or force reset
+
+Behavior:
+    No active detection session
+    detection_id = None
+    count = 0
+    Ready to start a new session
+
+**State 2: ACTIVE**
+
+Meaning: A person has been detected and the system is capturing frames (1/3, 2/3, or 3/3).
+
+Conditions to enter:
+
+    Detection passes all filters (area, aspect ratio, top-edge)
+    Camera state is IDLE
+    Cooldown period has passed since last session
+
+Behavior:
+
+    Generates unique detection_id (e.g., a8dca7ee) when first frame arrives
+    Increments count for each valid detection frame (1 → 2 → 3)
+    Updates last_activity timestamp after each frame
+    Sends each frame to recorder via draw_and_upload()
+    If count == MAX_IMAGES (3), transitions to WAITING_RESET
+
+**Example log:**
+                                                     
 ```bash
-IDLE
- ↓
-Person Detected
- ↓
-ACTIVE
- ↓
-3 Frames Uploaded
- ↓
-WAITING_RESET
- ↓
-Recorder Confirms
- ↓
-COMPLETED
- ↓
-Cooldown
- ↓
-IDLE
+
+[22:55:32] 🆔 Garage: New detection session ae3a2d65
+[22:55:32] ⚡ Garage: 1/3 [SID:ae3a2d65] conf=0.70 box=44x118px
+[22:55:35] ⚡ Garage: 2/3 [SID:ae3a2d65] conf=0.70 box=76x189px
+[22:55:38] ⚡ Garage: 3/3 [SID:ae3a2d65] conf=0.59 box=104x258px
+[22:55:38] 🛑 Garage: Last frame sent (3/3) [SID:ae3a2d65]
+```
+**State 3: WAITING_RESET**
+
+Meaning: All 3 frames have been sent to the recorder. The system is waiting for confirmation
+(reset signal) before allowing new detections.
+
+Conditions to enter:
+    count == MAX_IMAGES (3)
+    Successfully sent the last frame to recorder
+    State was ACTIVE
+
+Behavior:
+    No new detections accepted
+    last_waiting_start timestamp recorded
+    Waits for webhook call: POST /session-reset
+    Watchdog will force reset if stuck for WATCHDOG_TIMEOUT (300 seconds / 5 minutes)
+
+Why this state exists:
+
+    Prevents overlapping sessions
+    Ensures recorder has processed all frames
+    Allows recorder to control when next detection starts
+
+**State 4: COMPLETED**
+
+Meaning: Recorder has acknowledged receipt of the session (sent reset signal).
+
+Conditions to enter:
+
+    Recorder calls /session-reset webhook
+    State was WAITING_RESET
+
+Behavior:
+
+    Session is marked as complete
+    last_reset_time updated
+    Auto-transitions to IDLE after 5 seconds (cleanup delay)
+
+**Log example:**
+```
+[22:58:42] 📡 Recorder signaled: Garage reset - DETECTION RESUMED [SID:ae3a2d65]
 
 ```
+**State Transitions Summary**
+
+```
+From                    To	                    Trigger
+IDLE                    ACTIVE	          Valid person detection + cooldown passed
+ACTIVE                  WAITING_RESET	          3 frames sent to recorder
+WAITING_RESET	    COMPLETED	          Recorder sends /session-reset webhook
+COMPLETED	              IDLE	                    5-second auto-cleanup
+ACTIVE	              IDLE	                    Session timeout (no activity for SESSION_TIMEOUT seconds)
+WAITING_RESET	    IDLE	                    Watchdog force reset (stuck for WATCHDOG_TIMEOUT seconds)
+```
+
 This is actually one of the strongest parts of the system.
+
+### Session ID Management
+
+Each session has a unique 8-character hexadecimal ID (e.g., ae3a2d65), generated when first 
+frame is detected.
+
+Session ID is used for:
+    Tracing all frames belonging to the same person
+    Matching reset signals from recorder
+    Debugging and log correlation
+
+Session ID lifecycle:
+    Created in ACTIVE state (first frame)
+    Stored in state.detection_id and state.active_session_id
+    Included in every upload to recorder
+    Cleared when session completes or times out
+
+**Important Timers**
+```
+Timer	          Value	             Purpose
+COOLDOWN	          5.0 seconds	   Wait after session ends before starting new one (prevents rapid re-triggering)
+SESSION_TIMEOUT	300 seconds (5 min)	   Force reset if no frames received (stuck in ACTIVE)
+WATCHDOG_TIMEOUT	300 seconds (5 min)	   Force reset if stuck in WAITING_RESET
+RESET_DEDUP_WINDOW	2 seconds	             Ignore duplicate reset signals
+POST_RESET_COOLDOWN	(unified into COOLDOWN)Legacy - now using COOLDOWN
+```
+
+**Example: Complete Walk-through**
+```
+A person walks past the Garage camera:
+Time	Event	                    State Change	          Details
+0s	Person detected	          IDLE → ACTIVE	          New session ae3a2d65, frame 1/3 sent
+3s	Person still visible	ACTIVE	                    Frame 2/3 sent
+6s	Person still visible	ACTIVE	                    Frame 3/3 sent → State → WAITING_RESET
+6s - 60s	Recorder processes images	WAITING_RESET	          System waits for webhook
+60s	Recorder sends reset	WAITING_RESET → COMPLETED	Webhook received
+65s	Auto-cleanup	          COMPLETED → IDLE	          Ready for next detection
+```
+
+**What happens if the recorder never sends reset?**
+
+After WATCHDOG_TIMEOUT (300 seconds / 5 minutes), the watchdog forces a reset:
+```
+⚠️ Watchdog: Garage stuck. Force resetting.
+
+```
+This transitions WAITING_RESET → IDLE, freeing the camera for new detections.
+
+**Race Condition Protection**
+The system includes safeguards against timing issues:
+```
+Protection	Method
+Duplicate resets	RESET_DEDUP_WINDOW ignores resets within 2 seconds
+Upload race	Re-checks session ID inside lock after HTTP request
+Stale frames	Validates detection_id matches current session before state change
+```
+**Why This Design?**
+```
+Requirement	          Solution
+Avoid false positives	Requires 3 consecutive detections of same person
+Handle people leaving early	Partial session cleanup (1/3 or 2/3 frames)
+Allow asynchronous processing	WAITING_RESET state decouples detection from recorder
+Prevent session mixing	Unique SID per session
+Recover from failures	Watchdog timers force reset stuck sessions
+Debuggability	          Every state change logged with SID
+```
+
+This state machine ensures reliable, traceable, and robust person detection across multiple cameras.
+
+
+
 
 ### Hardware Performance Numbers
 <img width="928" height="453" alt="image" src="https://github.com/user-attachments/assets/476da0e4-90c2-4bfe-8f0e-2ccff9984515" />
