@@ -24,7 +24,8 @@ The system splits the workload across a cluster of Raspberry Pis. 6 IP cameras r
 
 
 * **Example Detections**
-<img width="663" height="127" alt="image" src="https://github.com/user-attachments/assets/2a67c5ce-a41c-40ac-96cf-fbe17a2067ac" />
+
+<img width="1151" height="236" alt="image" src="https://github.com/user-attachments/assets/974b7523-e794-4ac5-9ae0-bf3148693916" />
 
 
 
