@@ -404,7 +404,7 @@ Behavior:
 [22:58:42] 📡 Recorder signaled: Garage reset - DETECTION RESUMED [SID:ae3a2d65]
 
 ```
-**State Transitions Summary**
+State Transitions Summary
 
 ```
 
