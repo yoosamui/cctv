@@ -170,13 +170,33 @@ def send_reset_to_detector():
         'Content-Type': 'application/json',
         'X-API-KEY': WEBHOOK_SECRET
     }
+<<<<<<< HEAD
     payload = {"camera": CAM_NAME}
     max_retries = 3
+=======
+
+    payload = {
+        "camera": CAM_NAME
+    }
+
+    max_retries = 5
+>>>>>>> main
 
     for attempt in range(max_retries):
         try:
+<<<<<<< HEAD
             response = requests.post(DETECTOR_WEBHOOK_URL, json=payload, headers=headers, timeout=3)
             
+=======
+
+            response = requests.post(
+                DETECTOR_WEBHOOK_URL,
+                json=payload,
+                headers=headers,
+                timeout=5
+            )
+
+>>>>>>> main
             if response.status_code == 200:
                 print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] ✅ {CAM_NAME} session reset confirmed")
                 return True
