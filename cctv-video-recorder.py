@@ -208,7 +208,7 @@ def send_reset_to_detector():
         "camera": CAM_NAME
     }
 
-    max_retries = 3
+    max_retries = 5
 
     for attempt in range(max_retries):
 
@@ -218,7 +218,7 @@ def send_reset_to_detector():
                 DETECTOR_WEBHOOK_URL,
                 json=payload,
                 headers=headers,
-                timeout=3
+                timeout=5
             )
 
             if response.status_code == 200:

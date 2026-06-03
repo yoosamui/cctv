@@ -1,30 +1,27 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.24.7
+# CCTV IMAGE DETECTOR - VERSION 3.24.8
 # ==============================================================================
+#
+# IMPROVEMENTS in v3.24.8:
+#   1. Added DARK PIXEL FILTER to reject false positives with high dark pixel ratio
+#      - Configurable darkness threshold (0-255)
+#      - Configurable dark pixel ratio (0.0-1.0)
+#      - Only applies to low-confidence detections (saves CPU)
+#      - Uses OpenCV for fast pixel analysis (no Python loops)
+#   2. Fixed top-edge filter to consider label margin
+#   3. Rate-limited logging and image saving for dark filter
 #
 # IMPROVEMENTS in v3.24.7:
 #   1. Added rate-limited image saving for rejected detections
-#      - New SAVE_IMAGE_INTERVAL config (default 5.0 seconds)
-#      - Separate timers for each rejection type (area, maxarea, aspect, topedge)
-#      - Prevents disk flooding from thousands of rejected images
 #   2. Same pattern as debug logging - one image per 5 seconds per camera per rejection type
 #
 # IMPROVEMENTS in v3.24.6:
-#   1. Fixed shared log dictionary bug (separate _last_maxarea_log_time for max area filter)
-#   2. Ensured each filter has its own independent rate-limit timer for debug logging
-#
-# IMPROVEMENTS in v3.24.5:
-#   1. Fixed duplicate image annotation (removed unused annotated_frame variable)
-#   2. Fixed silent exception swallowing (added error logging to all except blocks)
-#
-# IMPROVEMENTS in v3.24.4:
-#   1. Added MAX AREA FILTER to reject large false positives (headlights, vehicles close to camera)
-#   2. Added camera-specific CAMERA_MAX_AREA configuration
-#   3. Added save_rejected_image support for area_too_large rejections
+#   1. Fixed shared log dictionary bug
+#   2. Ensured each filter has its own independent rate-limit timer
 #
 # AUTHOR: yoosamui
-# DATE: 2026-06-02
+# DATE: 2026-06-03
 # ==============================================================================
 import glob
 import cv2
@@ -51,7 +48,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 
-VERSION = "3.24.7"
+VERSION = "3.24.8"
 
 # ==========================================
 # SILENCE LOGS
@@ -64,7 +61,7 @@ logging.getLogger('urllib3').setLevel(logging.WARNING)
 
 
 # ==========================================
-# LOAD CONFIRATION
+# LOAD CONFIGURATION
 # ==========================================
 
 config = configparser.ConfigParser()
@@ -122,13 +119,20 @@ MAX_REJECTED_IMAGES = cfg_int("DEBUG", "MAX_REJECTED_IMAGES")
 ENABLE_AREA_FILTER = cfg_bool("FILTERS", "ENABLE_AREA_FILTER")
 ENABLE_ASPECT_FILTER = cfg_bool("FILTERS", "ENABLE_ASPECT_FILTER")
 ENABLE_TOP_EDGE_FILTER = cfg_bool("FILTERS", "ENABLE_TOP_EDGE_FILTER")
+ENABLE_DARK_FILTER = cfg_bool("FILTERS", "ENABLE_DARK_FILTER")
 
 MIN_PERSON_AREA = cfg_int("FILTERS", "MIN_PERSON_AREA")
 MIN_ASPECT_RATIO = cfg_float("FILTERS", "MIN_ASPECT_RATIO")
 MAX_ASPECT_RATIO = cfg_float("FILTERS", "MAX_ASPECT_RATIO")
+ASPECT_RATIO_CONF =  cfg_float("FILTERS", "ASPECT_RATIO_CONF")
 
 TOP_EDGE_MARGIN = cfg_int("FILTERS", "TOP_EDGE_MARGIN")
 TOP_EDGE_HIGH_CONF = cfg_float("FILTERS", "TOP_EDGE_HIGH_CONF")
+
+# Dark Pixel Filter Configuration
+DARKNESS_THRESHOLD = cfg_int("FILTERS", "DARKNESS_THRESHOLD")
+DARK_PIXEL_RATIO = cfg_float("FILTERS", "DARK_PIXEL_RATIO")
+DARK_FILTER_MIN_CONF = cfg_float("FILTERS", "DARK_FILTER_MIN_CONF")
 
 UPLOAD_WORKERS = cfg_int("UPLOAD", "UPLOAD_WORKERS")
 UPLOAD_QUEUE_SIZE = cfg_int("UPLOAD", "UPLOAD_QUEUE_SIZE")
@@ -138,23 +142,27 @@ UPLOAD_RETRY_DELAY_BASE = cfg_int("UPLOAD", "UPLOAD_RETRY_DELAY_BASE")
 TASK_QUEUE_SIZE = cfg_int("UPLOAD", "TASK_QUEUE_SIZE")
 RESULT_QUEUE_SIZE = cfg_int("UPLOAD", "RESULT_QUEUE_SIZE")
 
-CAMERA_ASPECT_RATIOS = {}
+FILTER_CONFIDENCE = cfg_float("FILTERS", "FILTER_CONFIDENCE")
+ASPECT_RATIO_CONF = cfg_float("FILTERS", "ASPECT_RATIO_CONF")
 
-for camera, value in config["CAMERA_ASPECT_RATIO"].items():
-    min_ratio, max_ratio = map(float, value.split(","))
-    CAMERA_ASPECT_RATIOS[camera] = (min_ratio, max_ratio)
-    
+# ==========================================
+# CAMERA-SPECIFIC CONFIGURATION LOADING
+# ==========================================
 CAMERA_MIN_AREA = {
-    camera: int(value)
+    camera.capitalize(): int(value)
     for camera, value in config["CAMERA_MIN_AREA"].items()
-}    
+}
 
 CAMERA_MAX_AREA = {
-    camera: int(value)
+    camera.capitalize(): int(value)
     for camera, value in config["CAMERA_MAX_AREA"].items()
 }
-    
-    
+
+CAMERA_ASPECT_RATIOS = {}
+for camera, value in config["CAMERA_ASPECT_RATIO"].items():
+    min_ratio, max_ratio = map(float, value.split(","))
+    CAMERA_ASPECT_RATIOS[camera.capitalize()] = (min_ratio, max_ratio)
+
 
 # ==========================================
 # REJECTED IMAGES FUNCTIONS
@@ -176,8 +184,30 @@ def ensure_rejected_dir():
         except Exception as e:
             print(f"[ERROR] Failed to create rejected images directory {REJECTED_IMAGES_DIR}: {e}")
 
+
+# ==========================================
+# DRAW TEXT WITH BACKGROUND (MOVED BEFORE save_rejected_image)
+# ==========================================
+def draw_text_with_background(img, text, position, font_scale, bg_color, text_color, thickness=1):
+    """Draw text with a colored background rectangle."""
+    x, y = position
+    (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+
+    padding = 4
+    # Draw background rectangle (filled)
+    cv2.rectangle(img,
+                  (x - padding, y - text_h - padding),
+                  (x + text_w + padding, y + padding),
+                  bg_color,
+                  -1)
+
+    # Draw text
+    cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness)
+
+
 def save_rejected_image(camera_name, frame, box, confidence, reason, aspect_ratio=None, area=None, min_value=None, top_y=None, min_conf=None):
     """Save rejected detection image for debugging with clean filename format"""
+
     if not SAVE_REJECTED_IMAGES:
         return
 
@@ -188,6 +218,7 @@ def save_rejected_image(camera_name, frame, box, confidence, reason, aspect_rati
         width = x2 - x1
         height = y2 - y1
 
+        # Draw rejection info on image
         debug_frame = frame.copy()
         yellow = (0, 255, 255)
         cv2.rectangle(debug_frame, (x1, y1), (x2, y2), yellow, 1)
@@ -199,9 +230,13 @@ def save_rejected_image(camera_name, frame, box, confidence, reason, aspect_rati
         elif reason == "area_too_large":
             filename = f"[{timestamp}] _[DEBUG] {camera_name}: Area too large ({area}px > {min_value}px) - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
         elif reason == "aspect":
-            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Bad aspect ratio ({aspect_ratio:.2f}) - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
+            ar = aspect_ratio if aspect_ratio is not None else 0
+            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Bad aspect ratio ({ar:.2f}) - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
         elif reason == "top_edge":
             filename = f"[{timestamp}] _[DEBUG] {camera_name}: Top-edge rejection - y1={top_y}, conf={confidence:.2f}<{min_conf} - box: {width}x{height}px REJECTED.jpg"
+        elif reason == "dark_pixels":
+            dark_percent = int(DARK_PIXEL_RATIO * 100)
+            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Too many dark pixels ({min_value}% > {dark_percent}%) - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
         else:
             filename = f"[{timestamp}] _[DEBUG] {camera_name}: {reason} - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
 
@@ -213,21 +248,70 @@ def save_rejected_image(camera_name, frame, box, confidence, reason, aspect_rati
         elif reason == "area_too_large":
             text = f"REJECTED: Area too large ({area}px > {min_value}px)"
         elif reason == "aspect":
-            text = f"REJECTED: Bad aspect ratio ({aspect_ratio:.2f})"
+            ar = aspect_ratio if aspect_ratio is not None else 0
+            text = f"REJECTED: Bad aspect ratio ({ar:.2f})"
         elif reason == "top_edge":
             text = f"REJECTED: Top-edge (y1={top_y}, conf={confidence:.2f}<{min_conf})"
+        elif reason == "dark_pixels":
+            dark_percent = int(DARK_PIXEL_RATIO * 100)
+            text = f"REJECTED: Too many dark pixels ({min_value}% > {dark_percent}%)"
         else:
             text = f"REJECTED: {reason}"
 
-        cv2.putText(debug_frame, text, (x1, y1 - 10),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, yellow, 1)
-        cv2.putText(debug_frame, f"Conf: {confidence:.2f}", (x1, y2 + 15),
-                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, yellow, 1)
+        draw_text_with_background(debug_frame, text, (x1, y1 - 10), 0.5, (0, 255, 255), (0, 0, 0))
+        draw_text_with_background(debug_frame, f"Conf: {confidence:.2f}", (x1, y1 - 28), 0.4, (0, 255, 255), (0, 0, 0))
 
         cv2.imwrite(filepath, debug_frame)
 
     except Exception as e:
         print(f"[ERROR] save_rejected_image failed for {camera_name}: {e}")
+
+# ==========================================
+# DARK PIXEL FILTER FUNCTION
+# ==========================================
+def is_dark_detection(frame, box, darkness_threshold=50, dark_pixel_ratio=0.3):
+    """
+    Check if a detection contains too many dark pixels (shadows, headlights, false positives).
+    Uses OpenCV for fast pixel analysis (no Python loops).
+
+    Args:
+        frame: Original frame (BGR)
+        box: Bounding box [x1, y1, x2, y2]
+        darkness_threshold: Pixel value < this is considered dark (0-255)
+        dark_pixel_ratio: Reject if > this percentage of pixels are dark (0.0-1.0)
+
+    Returns:
+        True if detection is too dark (should be rejected)
+    """
+    x1, y1, x2, y2 = box
+
+    # Ensure coordinates are within frame bounds
+    x1 = max(0, x1)
+    y1 = max(0, y1)
+    x2 = min(frame.shape[1], x2)
+    y2 = min(frame.shape[0], y2)
+
+    if x2 <= x1 or y2 <= y1:
+        return False
+
+    # Extract region of interest
+    roi = frame[y1:y2, x1:x2]
+
+    if roi.size == 0:
+        return False
+
+    # Convert to grayscale (fast)
+    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+
+    # Count dark pixels using OpenCV (very fast)
+    _, dark_mask = cv2.threshold(gray, darkness_threshold, 255, cv2.THRESH_BINARY_INV)
+    dark_pixels = cv2.countNonZero(dark_mask)
+    total_pixels = roi.shape[0] * roi.shape[1]
+
+    dark_ratio = dark_pixels / total_pixels if total_pixels > 0 else 0
+
+    return dark_ratio > dark_pixel_ratio
+
 
 # ==========================================
 # THREAD POOL SETTINGS
@@ -346,6 +430,9 @@ class CameraState:
 
 camera_states = {n: CameraState() for n in NODES}
 upload_executor = ThreadPoolExecutor(max_workers=UPLOAD_WORKERS, thread_name_prefix="upload")
+
+# Create a separate executor for email alerts (non-critical)
+email_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="email")
 
 # ==========================================
 # FLASK WEBHOOK SERVER
@@ -484,13 +571,22 @@ def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_
 # ==========================================
 # EMAIL ALERT
 # ==========================================
+
 def send_email_alert(camera_name, detection_id, frame_num, max_frames, confidence, frame=None):
     if not ENABLE_EMAIL_ALERTS:
+        print(f"[DEBUG] Email alerts disabled for {camera_name}")
         return
+
+    if not SMTP_USER or not SMTP_PASS or not ALERT_TO:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] Email credentials missing: USER={bool(SMTP_USER)}, PASS={bool(SMTP_PASS)}, TO={bool(ALERT_TO)}")
+        return
+
     try:
+        #print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] Sending email for {camera_name} - Frame {frame_num}/{max_frames}")
+
         msg = MIMEMultipart()
-        msg['From']    = SMTP_USER
-        msg['To']      = ALERT_TO
+        msg['From'] = SMTP_USER
+        msg['To'] = ALERT_TO
         msg['Subject'] = f"🚨 CCTV Alert: Person detected on {camera_name}"
 
         body = (
@@ -507,21 +603,35 @@ def send_email_alert(camera_name, detection_id, frame_num, max_frames, confidenc
             if success:
                 img = MIMEImage(buffer.tobytes(), name=f"{camera_name}_{detection_id}_{frame_num}.jpg")
                 msg.attach(img)
+               # print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] Image attached for {camera_name}")
 
+        #print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] Connecting to {SMTP_HOST}:{SMTP_PORT}...")
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
             server.starttls()
             server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
 
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ Email sent for {camera_name} - Session {detection_id}")
+
+
+    except smtplib.SMTPAuthenticationError as e:
+        print(f"[ERROR] Email auth failed for {camera_name}: Check SMTP_USER/PASS - {e}")
+    except smtplib.SMTPException as e:
+        print(f"[ERROR] SMTP error for {camera_name}: {e}")
     except Exception as e:
         print(f"[ERROR] Email alert failed for {camera_name}: {e}")
+        import traceback
+        traceback.print_exc()
+
+
 
 # ==========================================
 # YOLO WORKER PROCESS
 # ==========================================
 def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, max_aspect_ratio,
-                        enable_area_filter, enable_aspect_filter, camera_min_area_dict,
-                        camera_max_area_dict, camera_aspect_ratios_dict, yolo_iou, debug_log_interval):
+                        enable_area_filter, enable_aspect_filter, enable_dark_filter,
+                        camera_min_area_dict, camera_max_area_dict, camera_aspect_ratios_dict,
+                        yolo_iou, debug_log_interval):
 
     import threading
     # Separate timers for debug logs (prevents cross-filter suppression)
@@ -530,12 +640,14 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
     _last_aspect_log_time = {}        # Bad aspect ratio
     _last_topedge_log_time = {}       # Top-edge rejection
     _last_topedge_accept_log_time = {} # Top-edge acceptance
+    _last_dark_log_time = {}          # Dark pixel rejection
 
-    # NEW: Separate timers for image saving (rate-limited)
+    # Separate timers for image saving (rate-limited)
     _last_area_save_time = {}          # Area too small save timer
     _last_maxarea_save_time = {}       # Area too large save timer
     _last_aspect_save_time = {}        # Bad aspect ratio save timer
     _last_topedge_save_time = {}       # Top-edge rejection save timer
+    _last_dark_save_time = {}          # Dark pixel rejection save timer
 
     _log_lock = threading.Lock()
 
@@ -548,16 +660,46 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
         max_area = camera_max_area_dict.get(camera_name) if camera_max_area_dict else None
         min_ratio, max_ratio = camera_aspect_ratios_dict.get(camera_name, (min_aspect_ratio, max_aspect_ratio))
 
+        # Initialize aspect_ratio to a default value
+        aspect_ratio = 0.0           # Default value, will be overwritten if width > 0
+
         # ==========================================
-        # AREA FILTER (too small)
+        # DARK PIXEL FILTER (only for low confidence detections - saves CPU)
         # ==========================================
-        if enable_area_filter and area < min_area:
+        if enable_dark_filter and confidence < DARK_FILTER_MIN_CONF:
+            if is_dark_detection(original_frame, box, DARKNESS_THRESHOLD, DARK_PIXEL_RATIO):
+                with _log_lock:
+                    now = time.time()
+                    last_time = _last_dark_log_time.get(camera_name, 0)
+                    if now - last_time >= debug_log_interval and ENABLE_DEBUG_PRINTS:
+                        _last_dark_log_time[camera_name] = now
+                        dark_percent = int(DARK_PIXEL_RATIO * 100)
+                        msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: Too many dark pixels (> {dark_percent}%) - box: {width}x{height}px conf={confidence:.2f} REJECTED!"
+                        print(msg)
+
+                # Rate-limited image saving
+                if original_frame is not None and SAVE_REJECTED_IMAGES:
+                    now = time.time()
+                    last_save = _last_dark_save_time.get(camera_name, 0)
+                    if now - last_save >= SAVE_IMAGE_INTERVAL:
+                        _last_dark_save_time[camera_name] = now
+                        dark_percent = int(DARK_PIXEL_RATIO * 100)
+                        save_rejected_image(camera_name, original_frame, box, confidence, "dark_pixels",
+                                          min_value=dark_percent)
+                return False
+
+        # ==========================================
+        # MIN AREA FILTER (too small)
+        # ==========================================
+        # Reject only if area too small AND confidence is low
+#        if (aspect_ratio < min_ratio or aspect_ratio > max_ratio) or confidence >= FILTER_CONFIDENCE:
+        if enable_area_filter and area < min_area and confidence < FILTER_CONFIDENCE:
             with _log_lock:
                 now = time.time()
                 last_time = _last_area_log_time.get(camera_name, 0)
                 if now - last_time >= debug_log_interval and ENABLE_DEBUG_PRINTS:
                     _last_area_log_time[camera_name] = now
-                    msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: Area too small ({area}px < {min_area}px) - box: {width}x{height}px REJECTED!"
+                    msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: Area too small ({area}px > {min_area}px) - box: {width}x{height}px REJECTED!"
                     print(msg)
 
             # Rate-limited image saving
@@ -573,7 +715,8 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
         # ==========================================
         # MAX AREA FILTER (too large - headlights, vehicles)
         # ==========================================
-        if max_area is not None and area > max_area:
+        #if (max_area is not None and area > max_area) or confidence >= FILTER_CONFIDENCE:
+        if max_area is not None and area > max_area and confidence < FILTER_CONFIDENCE:
             with _log_lock:
                 now = time.time()
                 last_time = _last_maxarea_log_time.get(camera_name, 0)
@@ -597,7 +740,7 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
         # ==========================================
         if enable_aspect_filter and width > 0:
             aspect_ratio = height / width
-            if aspect_ratio < min_ratio or aspect_ratio > max_ratio:
+            if (aspect_ratio < min_ratio or aspect_ratio > max_ratio) and confidence < FILTER_CONFIDENCE:
                 with _log_lock:
                     now = time.time()
                     last_time = _last_aspect_log_time.get(camera_name, 0)
@@ -606,7 +749,6 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                         msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: Bad aspect ratio ({aspect_ratio:.2f}) - box: {width}x{height}px conf={confidence:.2f} REJECTED!"
                         print(msg)
 
-                # Rate-limited image saving
                 if original_frame is not None and SAVE_REJECTED_IMAGES:
                     now = time.time()
                     last_save = _last_aspect_save_time.get(camera_name, 0)
@@ -616,12 +758,14 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                                           aspect_ratio=aspect_ratio)
                 return False
 
+
         # ==========================================
         # TOP-EDGE (GROUND) FILTER
         # ==========================================
         if ENABLE_TOP_EDGE_FILTER and image_height is not None:
+            LABEL_MARGIN = 12  # Space reserved for label
             top_y = y1
-            if top_y <= TOP_EDGE_MARGIN:
+            if top_y <= TOP_EDGE_MARGIN + LABEL_MARGIN:
                 if confidence < TOP_EDGE_HIGH_CONF:
                     with _log_lock:
                         now = time.time()
@@ -756,7 +900,8 @@ def start_yolo_worker(task_q, result_q):
     yolo_process = multiprocessing.Process(
         target=yolo_worker_process,
         args=(task_q, result_q, MIN_PERSON_AREA, MIN_ASPECT_RATIO, MAX_ASPECT_RATIO,
-              ENABLE_AREA_FILTER, ENABLE_ASPECT_FILTER, CAMERA_MIN_AREA, CAMERA_MAX_AREA, CAMERA_ASPECT_RATIOS,
+              ENABLE_AREA_FILTER, ENABLE_ASPECT_FILTER, ENABLE_DARK_FILTER,
+              CAMERA_MIN_AREA, CAMERA_MAX_AREA, CAMERA_ASPECT_RATIOS,
               YOLO_IOU, DEBUG_LOG_INTERVAL),
         daemon=True
     )
@@ -773,7 +918,8 @@ def check_yolo_health(task_q, result_q):
             yolo_process = multiprocessing.Process(
                 target=yolo_worker_process,
                 args=(task_q, result_q, MIN_PERSON_AREA, MIN_ASPECT_RATIO, MAX_ASPECT_RATIO,
-                      ENABLE_AREA_FILTER, ENABLE_ASPECT_FILTER, CAMERA_MIN_AREA, CAMERA_MAX_AREA, CAMERA_ASPECT_RATIOS,
+                      ENABLE_AREA_FILTER, ENABLE_ASPECT_FILTER, ENABLE_DARK_FILTER,
+                      CAMERA_MIN_AREA, CAMERA_MAX_AREA, CAMERA_ASPECT_RATIOS,
                       YOLO_IOU, DEBUG_LOG_INTERVAL),
                 daemon=True
             )
@@ -900,10 +1046,35 @@ if __name__ == "__main__":
     print(f"TOP_EDGE_FILTER: {ENABLE_TOP_EDGE_FILTER} (margin={TOP_EDGE_MARGIN}px, high_conf={TOP_EDGE_HIGH_CONF})")
     print(f"AREA_FILTER: {ENABLE_AREA_FILTER}")
     print(f"ASPECT_FILTER: {ENABLE_ASPECT_FILTER}")
+    print(f"DARK_FILTER: {ENABLE_DARK_FILTER} (threshold={DARKNESS_THRESHOLD}, ratio={DARK_PIXEL_RATIO:.0%}, min_conf={DARK_FILTER_MIN_CONF})")
     print(f"MAX_AREA_FILTER: Enabled (per-camera thresholds)")
     print(f"DEBUG_LOG_INTERVAL: {DEBUG_LOG_INTERVAL}s")
     print(f"ENABLE_DEBUG_PRINTS: {ENABLE_DEBUG_PRINTS}")
     print(f"SAVE_IMAGE_INTERVAL: {SAVE_IMAGE_INTERVAL}s (rate-limited image saving)")
+    print("EMAIL CONFIGURATION DEBUG:")
+    print(f"  SMTP_HOST: {SMTP_HOST}")
+    print(f"  SMTP_PORT: {SMTP_PORT}")
+    print(f"  SMTP_USER: {'***SET***' if SMTP_USER else 'NOT SET'}")
+    print(f"  SMTP_PASS: {'***SET***' if SMTP_PASS else 'NOT SET'}")
+    print(f"  ALERT_TO: {ALERT_TO if ALERT_TO else 'NOT SET'}")
+    print(f"  ENABLE_EMAIL_ALERTS: {ENABLE_EMAIL_ALERTS}")
+    print("=" * 60)
+
+    print("CONFIG LOADING DEBUG:")
+    print(f"Config sections: {config.sections()}")
+
+    print("\nCAMERA_MIN_AREA from config:")
+    for camera, value in config["CAMERA_MIN_AREA"].items():
+        print(f"  {camera} = {value}")
+
+    print("\nCAMERA_MAX_AREA from config:")
+    for camera, value in config["CAMERA_MAX_AREA"].items():
+        print(f"  {camera} = {value}")
+
+    print("\nCAMERA_ASPECT_RATIO from config:")
+    for camera, value in config["CAMERA_ASPECT_RATIO"].items():
+        print(f"  {camera} = {value}")
+
     print("=" * 60)
 
     threading.Thread(target=session_watchdog, daemon=True).start()
@@ -963,10 +1134,11 @@ if __name__ == "__main__":
                     conf = detections[0]['conf'] if detections else 0
 
                     box = detections[0]['box']
+                    x1, y1, x2, y2 = box
                     width = int(box[2] - box[0])
                     height = int(box[3] - box[1])
 
-                    print(f"[{ts}] ⚡ {name}: {state.count}/{MAX_IMAGES} [SID:{detection_id}] conf={conf:.2f} box={width}x{height}px area={width*height}px")
+                    print(f"[{ts}] ⚡ >>> {name}: {state.count}/{MAX_IMAGES} [SID:{detection_id}] conf={conf:.2f} box={width}x{height}px area={width*height}px {y1}px")
 
                 if current_count is None or detection_id is None:
                     continue
@@ -974,11 +1146,10 @@ if __name__ == "__main__":
                 if frame is not None:
                     draw_and_upload(name, NODES[name]["rpi_url"], frame, detections, ts,
                                   current_count, MAX_IMAGES, detection_id)
-                    # Send email alert (non-blocking)
+                    # Send email alert using dedicated executor
                     conf = detections[0]['conf'] if detections else 0
-                    upload_executor.submit(
-                        send_email_alert,
-                        name, detection_id, current_count, MAX_IMAGES, conf, frame.copy()
+                    email_executor.submit(
+                        send_email_alert, name, detection_id, current_count, MAX_IMAGES, conf, frame.copy()
                     )
 
                 with state.lock:
@@ -1014,6 +1185,7 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("\nShutting down...")
         upload_executor.shutdown(wait=True)
+        email_executor.shutdown(wait=True)
         if yolo_process:
             yolo_process.terminate()
             yolo_process.join(timeout=2)
