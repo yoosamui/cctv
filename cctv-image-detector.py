@@ -12,14 +12,6 @@
 #   2. Fixed top-edge filter to consider label margin
 #   3. Rate-limited logging and image saving for dark filter
 #
-# IMPROVEMENTS in v3.24.7:
-#   1. Added rate-limited image saving for rejected detections
-#   2. Same pattern as debug logging - one image per 5 seconds per camera per rejection type
-#
-# IMPROVEMENTS in v3.24.6:
-#   1. Fixed shared log dictionary bug
-#   2. Ensured each filter has its own independent rate-limit timer
-#
 # AUTHOR: yoosamui
 # DATE: 2026-06-03
 # ==============================================================================
@@ -124,7 +116,6 @@ ENABLE_DARK_FILTER = cfg_bool("FILTERS", "ENABLE_DARK_FILTER")
 MIN_PERSON_AREA = cfg_int("FILTERS", "MIN_PERSON_AREA")
 MIN_ASPECT_RATIO = cfg_float("FILTERS", "MIN_ASPECT_RATIO")
 MAX_ASPECT_RATIO = cfg_float("FILTERS", "MAX_ASPECT_RATIO")
-ASPECT_RATIO_CONF =  cfg_float("FILTERS", "ASPECT_RATIO_CONF")
 
 TOP_EDGE_MARGIN = cfg_int("FILTERS", "TOP_EDGE_MARGIN")
 TOP_EDGE_HIGH_CONF = cfg_float("FILTERS", "TOP_EDGE_HIGH_CONF")
@@ -143,7 +134,6 @@ TASK_QUEUE_SIZE = cfg_int("UPLOAD", "TASK_QUEUE_SIZE")
 RESULT_QUEUE_SIZE = cfg_int("UPLOAD", "RESULT_QUEUE_SIZE")
 
 FILTER_CONFIDENCE = cfg_float("FILTERS", "FILTER_CONFIDENCE")
-ASPECT_RATIO_CONF = cfg_float("FILTERS", "ASPECT_RATIO_CONF")
 
 # ==========================================
 # CAMERA-SPECIFIC CONFIGURATION LOADING
@@ -186,7 +176,7 @@ def ensure_rejected_dir():
 
 
 # ==========================================
-# DRAW TEXT WITH BACKGROUND (MOVED BEFORE save_rejected_image)
+# DRAW TEXT WITH BACKGROUND
 # ==========================================
 def draw_text_with_background(img, text, position, font_scale, bg_color, text_color, thickness=1):
     """Draw text with a colored background rectangle."""
@@ -574,16 +564,12 @@ def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_
 
 def send_email_alert(camera_name, detection_id, frame_num, max_frames, confidence, frame=None):
     if not ENABLE_EMAIL_ALERTS:
-        print(f"[DEBUG] Email alerts disabled for {camera_name}")
         return
 
     if not SMTP_USER or not SMTP_PASS or not ALERT_TO:
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] Email credentials missing: USER={bool(SMTP_USER)}, PASS={bool(SMTP_PASS)}, TO={bool(ALERT_TO)}")
         return
 
     try:
-        #print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] Sending email for {camera_name} - Frame {frame_num}/{max_frames}")
-
         msg = MIMEMultipart()
         msg['From'] = SMTP_USER
         msg['To'] = ALERT_TO
@@ -603,9 +589,7 @@ def send_email_alert(camera_name, detection_id, frame_num, max_frames, confidenc
             if success:
                 img = MIMEImage(buffer.tobytes(), name=f"{camera_name}_{detection_id}_{frame_num}.jpg")
                 msg.attach(img)
-               # print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] Image attached for {camera_name}")
 
-        #print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] Connecting to {SMTP_HOST}:{SMTP_PORT}...")
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
             server.starttls()
             server.login(SMTP_USER, SMTP_PASS)
@@ -613,17 +597,8 @@ def send_email_alert(camera_name, detection_id, frame_num, max_frames, confidenc
 
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ Email sent for {camera_name} - Session {detection_id}")
 
-
-    except smtplib.SMTPAuthenticationError as e:
-        print(f"[ERROR] Email auth failed for {camera_name}: Check SMTP_USER/PASS - {e}")
-    except smtplib.SMTPException as e:
-        print(f"[ERROR] SMTP error for {camera_name}: {e}")
     except Exception as e:
         print(f"[ERROR] Email alert failed for {camera_name}: {e}")
-        import traceback
-        traceback.print_exc()
-
-
 
 # ==========================================
 # YOLO WORKER PROCESS
@@ -661,7 +636,14 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
         min_ratio, max_ratio = camera_aspect_ratios_dict.get(camera_name, (min_aspect_ratio, max_aspect_ratio))
 
         # Initialize aspect_ratio to a default value
-        aspect_ratio = 0.0           # Default value, will be overwritten if width > 0
+        aspect_ratio = 0.0
+
+        # ==========================================
+        # HIGH CONFIDENCE BYPASS
+        # If confidence is high enough, accept immediately
+        # ==========================================
+        if confidence >= FILTER_CONFIDENCE:
+            return True
 
         # ==========================================
         # DARK PIXEL FILTER (only for low confidence detections - saves CPU)
@@ -691,15 +673,13 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
         # ==========================================
         # MIN AREA FILTER (too small)
         # ==========================================
-        # Reject only if area too small AND confidence is low
-#        if (aspect_ratio < min_ratio or aspect_ratio > max_ratio) or confidence >= FILTER_CONFIDENCE:
         if enable_area_filter and area < min_area and confidence < FILTER_CONFIDENCE:
             with _log_lock:
                 now = time.time()
                 last_time = _last_area_log_time.get(camera_name, 0)
                 if now - last_time >= debug_log_interval and ENABLE_DEBUG_PRINTS:
                     _last_area_log_time[camera_name] = now
-                    msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: Area too small ({area}px > {min_area}px) - box: {width}x{height}px REJECTED!"
+                    msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: Area too small ({area}px < {min_area}px) - box: {width}x{height}px REJECTED!"
                     print(msg)
 
             # Rate-limited image saving
@@ -715,7 +695,6 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
         # ==========================================
         # MAX AREA FILTER (too large - headlights, vehicles)
         # ==========================================
-        #if (max_area is not None and area > max_area) or confidence >= FILTER_CONFIDENCE:
         if max_area is not None and area > max_area and confidence < FILTER_CONFIDENCE:
             with _log_lock:
                 now = time.time()
@@ -757,7 +736,6 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                         save_rejected_image(camera_name, original_frame, box, confidence, "aspect",
                                           aspect_ratio=aspect_ratio)
                 return False
-
 
         # ==========================================
         # TOP-EDGE (GROUND) FILTER
