@@ -2,7 +2,7 @@
 *_BAK
 *.txt
 *.yml
-*.env
+#*.env
 *.conf
 *.onnx
 *.onnx_*
