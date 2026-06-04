@@ -263,6 +263,21 @@ def draw_text_with_background(img, text, position, font_scale, bg_color, text_co
     # Draw text
     cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness)
 
+def draw_text_safe(img, text, x, y, font_scale, color, thickness=1):
+    """Draw text safely within image boundaries."""
+    (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+
+    # Ensure text stays within image
+    if x + text_w > img.shape[1]:
+        x = img.shape[1] - text_w - 5
+    if x < 0:
+        x = 5
+    if y - text_h < 0:
+        y = text_h + 5
+    if y > img.shape[0]:
+        y = img.shape[0] - 5
+
+    cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
 
 def save_rejected_image(camera_name, frame, box, confidence, reason, aspect_ratio=None, area=None, min_value=None, top_y=None, min_conf=None):
     """Save rejected detection image for debugging with clean filename format"""
@@ -277,10 +292,13 @@ def save_rejected_image(camera_name, frame, box, confidence, reason, aspect_rati
         width = x2 - x1
         height = y2 - y1
 
+        # Get image dimensions
+        img_height, img_width = frame.shape[:2]
+
         # Draw rejection info on image
         debug_frame = frame.copy()
         yellow = (0, 255, 255)
-        cv2.rectangle(debug_frame, (x1, y1), (x2, y2), yellow, 1)
+        cv2.rectangle(debug_frame, (x1, y1), (x2, y2), yellow, 2)
 
         timestamp = time.strftime('%Y-%m-%d_%H%M%S')
 
@@ -302,28 +320,94 @@ def save_rejected_image(camera_name, frame, box, confidence, reason, aspect_rati
         filename = filename.replace(" ", "_").replace(":", "-")
         filepath = os.path.join(REJECTED_IMAGES_DIR, filename)
 
+        # ==========================================
+        # CREATE TEXT LINES (ORDERED CORRECTLY)
+        # ==========================================
         if reason == "area":
-            text = f"REJECTED: Area too small ({area}px < {min_value}px)"
+            line1 = f"REJECTED: Area too small ({area}px < {min_value}px)"
         elif reason == "area_too_large":
-            text = f"REJECTED: Area too large ({area}px > {min_value}px)"
+            line1 = f"REJECTED: Area too large ({area}px > {min_value}px)"
         elif reason == "aspect":
             ar = aspect_ratio if aspect_ratio is not None else 0
-            text = f"REJECTED: Bad aspect ratio ({ar:.2f})"
+            line1 = f"REJECTED: Bad aspect ratio ({ar:.2f})"
         elif reason == "top_edge":
-            text = f"REJECTED: Top-edge (y1={top_y}, conf={confidence:.2f}<{min_conf})"
+            line1 = f"REJECTED: Top-edge (y1={top_y})"
         elif reason == "dark_pixels":
             dark_percent = int(DARK_PIXEL_RATIO * 100)
-            text = f"REJECTED: Too many dark pixels ({min_value}% > {dark_percent}%)"
+            line1 = f"REJECTED: Too many dark pixels (>{dark_percent}%)"
         else:
-            text = f"REJECTED: {reason}"
+            line1 = f"REJECTED: {reason}"
 
-        draw_text_with_background(debug_frame, text, (x1, y1 - 10), 0.5, (0, 255, 255), (0, 0, 0))
-        draw_text_with_background(debug_frame, f"Conf: {confidence:.2f}", (x1, y1 - 28), 0.4, (0, 255, 255), (0, 0, 0))
+        line2 = f"Detection Conf: {confidence:.2f}"
+        line3 = f"YOLO Threshold: {YOLO_CONFIDENCE:.2f}"
+        line4 = f"Filter Threshold: {FILTER_CONFIDENCE:.2f}"
+
+        lines = [line1, line2, line3, line4]
+
+        # ==========================================
+        # FIND BEST TEXT POSITION
+        # ==========================================
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        thickness = 1
+
+        # Get max text width
+        max_width = 0
+        line_heights = []
+        for line in lines:
+            (w, h), _ = cv2.getTextSize(line, font, font_scale, thickness)
+            max_width = max(max_width, w)
+            line_heights.append(h)
+
+        line_spacing = 22
+        total_text_height = sum(line_heights) + (len(lines) - 1) * line_spacing
+
+        # Try positions in order: right, left, below
+        text_x = x2 + 10
+        text_y = y1 + line_heights[0]
+
+        # Check right side
+        if text_x + max_width > img_width:
+            # Try left side
+            text_x = x1 - max_width - 10
+            if text_x < 0:
+                # Put below
+                text_x = x1
+                text_y = y2 + line_heights[0] + 10
+
+        # Ensure text doesn't go off bottom
+        if text_y + total_text_height > img_height:
+            text_y = max(line_heights[0] + 5, img_height - total_text_height - 10)
+
+        # Ensure text doesn't go off top
+        if text_y - line_heights[0] < 0:
+            text_y = line_heights[0] + 5
+
+        # ==========================================
+        # DRAW TEXT WITH BACKGROUND
+        # ==========================================
+        for i, line in enumerate(lines):
+            (w, h), _ = cv2.getTextSize(line, font, font_scale, thickness)
+            y_pos = text_y + i * line_spacing
+
+            # Draw yellow background
+            cv2.rectangle(debug_frame,
+                         (text_x - 3, y_pos - h - 2),
+                         (text_x + w + 3, y_pos + 2),
+                         (0, 255, 255),
+                         -1)
+
+            # Draw black text
+            cv2.putText(debug_frame, line, (text_x, y_pos), font, font_scale, (0, 0, 0), thickness)
 
         cv2.imwrite(filepath, debug_frame)
+        print(f"[DEBUG] Saved rejected image: {filepath}")
 
     except Exception as e:
         print(f"[ERROR] save_rejected_image failed for {camera_name}: {e}")
+        import traceback
+        traceback.print_exc()
+
 
 # ==========================================
 # DARK PIXEL FILTER FUNCTION
@@ -543,6 +627,7 @@ def session_reset():
             if old_detection_id and old_count > 0:
                 email_executor.submit(send_session_email, camera_name, old_detection_id)
 
+
         return '', 200
     except Exception as e:
         print(f"Error in session_reset: {e}")
@@ -700,8 +785,140 @@ def send_session_email(camera_name, detection_id):
     except Exception as e:
         print(f"[ERROR] Email alert failed for {camera_name}: {e}")
 
+
+def save_rejected_image(camera_name, frame, box, confidence, reason, aspect_ratio=None, area=None, min_value=None, top_y=None, min_conf=None):
+    """Save rejected detection image for debugging with clean filename format"""
+
+    if not SAVE_REJECTED_IMAGES:
+        return
+
+    try:
+        ensure_rejected_dir()
+
+        x1, y1, x2, y2 = box
+        width = x2 - x1
+        height = y2 - y1
+
+        # Get image dimensions
+        img_height, img_width = frame.shape[:2]
+
+        # Draw rejection info on image
+        debug_frame = frame.copy()
+        yellow = (0, 255, 255)
+        cv2.rectangle(debug_frame, (x1, y1), (x2, y2), yellow, 2)
+
+        timestamp = time.strftime('%Y-%m-%d_%H%M%S')
+
+        if reason == "area":
+            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Area too small ({area}px < {min_value}px) - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
+        elif reason == "area_too_large":
+            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Area too large ({area}px > {min_value}px) - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
+        elif reason == "aspect":
+            ar = aspect_ratio if aspect_ratio is not None else 0
+            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Bad aspect ratio ({ar:.2f}) - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
+        elif reason == "top_edge":
+            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Top-edge rejection - y1={top_y}, conf={confidence:.2f}<{min_conf} - box: {width}x{height}px REJECTED.jpg"
+        elif reason == "dark_pixels":
+            dark_percent = int(DARK_PIXEL_RATIO * 100)
+            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Too many dark pixels ({min_value}% > {dark_percent}%) - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
+        else:
+            filename = f"[{timestamp}] _[DEBUG] {camera_name}: {reason} - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
+
+        filename = filename.replace(" ", "_").replace(":", "-")
+        filepath = os.path.join(REJECTED_IMAGES_DIR, filename)
+
+        # ==========================================
+        # CREATE TEXT LINES (ORDERED CORRECTLY)
+        # ==========================================
+        if reason == "area":
+            line1 = f"REJECTED: Area too small ({area}px < {min_value}px)"
+        elif reason == "area_too_large":
+            line1 = f"REJECTED: Area too large ({area}px > {min_value}px)"
+        elif reason == "aspect":
+            ar = aspect_ratio if aspect_ratio is not None else 0
+            line1 = f"REJECTED: Bad aspect ratio ({ar:.2f})"
+        elif reason == "top_edge":
+            line1 = f"REJECTED: Top-edge (y1={top_y})"
+        elif reason == "dark_pixels":
+            dark_percent = int(DARK_PIXEL_RATIO * 100)
+            line1 = f"REJECTED: Too many dark pixels (>{dark_percent}%)"
+        else:
+            line1 = f"REJECTED: {reason}"
+
+        line2 = f"Detection Conf: {confidence:.2f}"
+        line3 = f"YOLO Threshold: {YOLO_CONFIDENCE:.2f}"
+        line4 = f"Filter Threshold: {FILTER_CONFIDENCE:.2f}"
+
+        lines = [line1, line2, line3, line4]
+
+        # ==========================================
+        # FIND BEST TEXT POSITION
+        # ==========================================
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        thickness = 1
+
+        # Get max text width
+        max_width = 0
+        line_heights = []
+        for line in lines:
+            (w, h), _ = cv2.getTextSize(line, font, font_scale, thickness)
+            max_width = max(max_width, w)
+            line_heights.append(h)
+
+        line_spacing = 22
+        total_text_height = sum(line_heights) + (len(lines) - 1) * line_spacing
+
+        # Try positions in order: right, left, below
+        text_x = x2 + 10
+        text_y = y1 + line_heights[0]
+
+        # Check right side
+        if text_x + max_width > img_width:
+            # Try left side
+            text_x = x1 - max_width - 10
+            if text_x < 0:
+                # Put below
+                text_x = x1
+                text_y = y2 + line_heights[0] + 10
+
+        # Ensure text doesn't go off bottom
+        if text_y + total_text_height > img_height:
+            text_y = max(line_heights[0] + 5, img_height - total_text_height - 10)
+
+        # Ensure text doesn't go off top
+        if text_y - line_heights[0] < 0:
+            text_y = line_heights[0] + 5
+
+        # ==========================================
+        # DRAW TEXT WITH BACKGROUND
+        # ==========================================
+        for i, line in enumerate(lines):
+            (w, h), _ = cv2.getTextSize(line, font, font_scale, thickness)
+            y_pos = text_y + i * line_spacing
+
+            # Draw yellow background
+            cv2.rectangle(debug_frame,
+                         (text_x - 3, y_pos - h - 2),
+                         (text_x + w + 3, y_pos + 2),
+                         (0, 255, 255),
+                         -1)
+
+            # Draw black text
+            cv2.putText(debug_frame, line, (text_x, y_pos), font, font_scale, (0, 0, 0), thickness)
+
+        cv2.imwrite(filepath, debug_frame)
+        print(f"[DEBUG] Saved rejected image: {filepath}")
+
+    except Exception as e:
+        print(f"[ERROR] save_rejected_image failed for {camera_name}: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+
 # ==========================================
-# EMAIL ALERT - SEND REJECTION EMAIL (RATE LIMITED)
+# EMAIL ALERT - SEND REJECTION EMAIL
 # ==========================================
 def send_rejection_email(camera_name, frame, box, confidence, reason, aspect_ratio=None, area=None, min_value=None):
     """Send email with rejected image for debugging."""
@@ -715,6 +932,9 @@ def send_rejection_email(camera_name, frame, box, confidence, reason, aspect_rat
         x1, y1, x2, y2 = box
         width = x2 - x1
         height = y2 - y1
+        # Get image dimensions
+        img_height, img_width = frame.shape[:2]
+
 
         # Draw rejection info on image
         annotated_frame = frame.copy()
@@ -740,17 +960,94 @@ def send_rejection_email(camera_name, frame, box, confidence, reason, aspect_rat
             text = f"REJECTED: {reason}"
             subject = f"⚠️ CCTV Rejection: {reason} on {camera_name}"
 
-        draw_text_with_background(annotated_frame, text, (x1, y1 - 10), 0.5, (0, 255, 255), (0, 0, 0))
-        draw_text_with_background(annotated_frame, f"Conf: {confidence:.2f}", (x1, y1 - 28), 0.4, (0, 255, 255), (0, 0, 0))
+
+        # ==========================================
+        # CREATE TEXT LINES (ORDERED CORRECTLY)
+        # ==========================================
+        if reason == "area":
+            line1 = f"REJECTED: Area too small ({area}px < {min_value}px)"
+        elif reason == "area_too_large":
+            line1 = f"REJECTED: Area too large ({area}px > {min_value}px)"
+        elif reason == "aspect":
+            ar = aspect_ratio if aspect_ratio is not None else 0
+            line1 = f"REJECTED: Bad aspect ratio ({ar:.2f})"
+        elif reason == "top_edge":
+            line1 = f"REJECTED: Top-edge (y1={y1})"
+        elif reason == "dark_pixels":
+            dark_percent = int(DARK_PIXEL_RATIO * 100)
+            line1 = f"REJECTED: Too many dark pixels (>{dark_percent}%)"
+        else:
+            line1 = f"REJECTED: {reason}"
+
+        area = img_width * img_width
+        line2 = f"Detection Conf: {confidence:.2f}"
+        line3 = f"YOLO Conf/Filter Conf: {YOLO_CONFIDENCE:.2f}/{FILTER_CONFIDENCE:.2f} "
+        line4 = f"size: {width}x{height} area: {width * height}"
 
 
-        #cv2.putText(annotated_frame, text, (x1, y1 - 10),
-        #           cv2.FONT_HERSHEY_SIMPLEX, 0.5, yellow, 1)
-        #cv2.putText(annotated_frame, f"Conf: {confidence:.2f}", (x1, y2 + 15),
-        #           cv2.FONT_HERSHEY_SIMPLEX, 0.4, yellow, 1)
+        lines = [line1, line2, line3, line4]
+
+        # ==========================================
+        # FIND BEST TEXT POSITION
+        # ==========================================
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        font_scale = 0.5
+        thickness = 1
+
+        # Get max text width
+        max_width = 0
+        line_heights = []
+        for line in lines:
+            (w, h), _ = cv2.getTextSize(line, font, font_scale, thickness)
+            max_width = max(max_width, w)
+            line_heights.append(h)
+
+        line_spacing = 22
+        total_text_height = sum(line_heights) + (len(lines) - 1) * line_spacing
+
+        # Try positions in order: right, left, below
+        text_x = x2 + 10
+        text_y = y1 + line_heights[0]
+
+        # Check right side
+        if text_x + max_width > img_width:
+            # Try left side
+            text_x = x1 - max_width - 10
+            if text_x < 0:
+                # Put below
+                text_x = x1
+                text_y = y2 + line_heights[0] + 10
+
+        # Ensure text doesn't go off bottom
+        if text_y + total_text_height > img_height:
+            text_y = max(line_heights[0] + 5, img_height - total_text_height - 10)
+
+        # Ensure text doesn't go off top
+        if text_y - line_heights[0] < 0:
+            text_y = y2 + line_heights[0] + 5
+
+        # ==========================================
+        # DRAW TEXT WITH BACKGROUND
+        # ==========================================
+        for i, line in enumerate(lines):
+            (w, h), _ = cv2.getTextSize(line, font, font_scale, thickness)
+            y_pos = text_y + i * line_spacing
+
+            # Draw yellow background
+            cv2.rectangle(annotated_frame,
+                         (text_x - 3, y_pos - h - 2),
+                         (text_x + w + 3, y_pos + 2),
+                         (0, 255, 255),
+                         -1)
+
+        draw_text_with_background(annotated_frame, line1, (text_x, text_y), 0.5, (0, 255, 255), (0, 0, 0))
+        draw_text_with_background(annotated_frame, line2, (text_x, text_y+24), 0.5, (0, 255, 255), (0, 0, 0))
+        draw_text_with_background(annotated_frame, line3, (text_x, text_y+(24*2)), 0.5, (0, 255, 255), (0, 0, 0))
+        draw_text_with_background(annotated_frame, line4, (text_x, text_y+(24*3)), 0.5, (0, 255, 255), (0, 0, 0))
 
         success, buffer = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         if not success:
+            print(f"[ERROR] Rejection email failed for {camera_name}: can not get buffer!")
             return
 
         msg = MIMEMultipart()
@@ -884,7 +1181,7 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                 return False
 
         # ==========================================
-        # MIN AREA FILTER (too small)
+        # MIN AREA FILTER (too small) - WITH DEBUG
         # ==========================================
         if enable_area_filter and area < min_area:
             with _log_lock:
@@ -895,16 +1192,32 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                     msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: Area too small ({area}px < {min_area}px) - box: {width}x{height}px REJECTED!"
                     print(msg)
 
-            # Rate-limited image saving
+            # ==========================================
+            # DEBUG: Check save conditions
+            # ==========================================
+            print(f"[DEBUG] SAVE_REJECTED_IMAGES={SAVE_REJECTED_IMAGES}")
+            print(f"[DEBUG] original_frame is None? {original_frame is None}")
+
+            # ==========================================
+            # SAVE REJECTED IMAGE
+            # ==========================================
             if original_frame is not None and SAVE_REJECTED_IMAGES:
                 now = time.time()
                 last_save = _last_area_save_time.get(camera_name, 0)
+                print(f"[DEBUG] last_save={last_save}, now={now}, diff={now - last_save}, SAVE_IMAGE_INTERVAL={SAVE_IMAGE_INTERVAL}")
                 if now - last_save >= SAVE_IMAGE_INTERVAL:
                     _last_area_save_time[camera_name] = now
+                    print(f"[DEBUG] ABOUT TO CALL save_rejected_image for {camera_name}")
                     save_rejected_image(camera_name, original_frame, box, confidence, "area",
                                       area=area, min_value=min_area)
+                else:
+                    print(f"[DEBUG] SKIPPING save - rate limited (need {SAVE_IMAGE_INTERVAL}s, only {now - last_save:.1f}s since last)")
+            else:
+                print(f"[DEBUG] SKIPPING save - condition failed (SAVE_REJECTED_IMAGES={SAVE_REJECTED_IMAGES}, original_frame is None? {original_frame is None})")
 
-            # Rate-limited rejection email
+            # ==========================================
+            # SEND REJECTION EMAIL
+            # ==========================================
             if original_frame is not None:
                 now = time.time()
                 last_email = _last_rejection_email_time.get(camera_name, 0)
@@ -1286,22 +1599,22 @@ if __name__ == "__main__":
     print(f"  ENABLE_EMAIL_ALERTS: {ENABLE_EMAIL_ALERTS}")
     print("=" * 60)
 
-    print("CONFIG LOADING DEBUG:")
-    print(f"Config sections: {config.sections()}")
-
-    print("\nCAMERA_MIN_AREA from config:")
-    for camera, value in config["CAMERA_MIN_AREA"].items():
-        print(f"  {camera} = {value}")
-
-    print("\nCAMERA_MAX_AREA from config:")
-    for camera, value in config["CAMERA_MAX_AREA"].items():
-        print(f"  {camera} = {value}")
-
-    print("\nCAMERA_ASPECT_RATIO from config:")
-    for camera, value in config["CAMERA_ASPECT_RATIO"].items():
-        print(f"  {camera} = {value}")
-
-    print("=" * 60)
+#    print("CONFIG LOADING DEBUG:")
+#    print(f"Config sections: {config.sections()}")
+#
+#    print("\nCAMERA_MIN_AREA from config:")
+#    for camera, value in config["CAMERA_MIN_AREA"].items():
+#        print(f"  {camera} = {value}")
+#
+#    print("\nCAMERA_MAX_AREA from config:")
+#    for camera, value in config["CAMERA_MAX_AREA"].items():
+#        print(f"  {camera} = {value}")
+#
+#    print("\nCAMERA_ASPECT_RATIO from config:")
+#    for camera, value in config["CAMERA_ASPECT_RATIO"].items():
+#        print(f"  {camera} = {value}")
+#
+#    print("=" * 60)
 
     threading.Thread(target=session_watchdog, daemon=True).start()
 
