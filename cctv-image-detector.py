@@ -1,19 +1,25 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.24.8
+# CCTV IMAGE DETECTOR - VERSION 3.25.0
 # ==============================================================================
 #
-# IMPROVEMENTS in v3.24.8:
-#   1. Added DARK PIXEL FILTER to reject false positives with high dark pixel ratio
-#      - Configurable darkness threshold (0-255)
-#      - Configurable dark pixel ratio (0.0-1.0)
-#      - Only applies to low-confidence detections (saves CPU)
-#      - Uses OpenCV for fast pixel analysis (no Python loops)
-#   2. Fixed top-edge filter to consider label margin
-#   3. Rate-limited logging and image saving for dark filter
+# IMPROVEMENTS in v3.25.0:
+#   1. Day/Night hierarchical configuration support
+#      - Base daytime defaults in CAMERA_* sections
+#      - Night overrides in NIGHT_CAMERA_* sections (only changed values needed)
+#      - Automatic switching based on system time
+#   2. Added merge_camera_config() and load_camera_config() helper functions
+#   3. Periodic config reload thread (checks every hour for day/night transition)
+#
+# IMPROVEMENTS in v3.24.9:
+#   1. Changed email alerts: send ONE email per session (after reset) instead of per frame
+#   2. Email now includes ALL frames from the session (up to MAX_IMAGES)
+#   3. Added session_frames buffer in CameraState to store frames for email
+#   4. Frames are sorted by confidence, best frames kept for email
+#   5. Added rejection emails for false positives (rate-limited to 1 per 5 minutes per camera)
 #
 # AUTHOR: yoosamui
-# DATE: 2026-06-03
+# DATE: 2026-06-04
 # ==============================================================================
 import glob
 import cv2
@@ -27,6 +33,7 @@ import uuid
 import onnxruntime as ort
 import numpy as np
 import configparser
+import datetime
 from queue import Empty, Full
 from urllib.parse import quote
 from dotenv import load_dotenv
@@ -40,7 +47,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 
-VERSION = "3.24.8"
+VERSION = "3.25.0"
 
 # ==========================================
 # SILENCE LOGS
@@ -76,6 +83,66 @@ def cfg_bool(section, key):
 
 def cfg_str(section, key):
     return config.get(section, key)
+
+
+# ==========================================
+# TIME-BASED CONFIGURATION HELPERS
+# ==========================================
+DAY_START_HOUR = 7   # 7 AM
+DAY_END_HOUR = 19    # 7 PM
+
+def is_daytime():
+    """Return True if current time is daytime."""
+    now = datetime.datetime.now()
+    current_hour = now.hour
+    return DAY_START_HOUR <= current_hour < DAY_END_HOUR
+
+def merge_camera_config(base_dict, override_dict):
+    """
+    Merge two camera configuration dictionaries.
+    override_dict takes precedence over base_dict.
+    """
+    result = base_dict.copy()
+    result.update(override_dict)
+    return result
+
+def load_camera_config(section_prefix):
+    """
+    Load camera configuration with support for day/night overrides.
+
+    Args:
+        section_prefix: 'CAMERA_MIN_AREA', 'CAMERA_MAX_AREA', or 'CAMERA_ASPECT_RATIO'
+
+    Returns:
+        Dictionary with camera configurations merged from base and night overrides
+    """
+    # Load base configuration (daytime defaults)
+    base_config = {}
+    for camera, value in config[section_prefix].items():
+        camera_name = camera.capitalize()
+        if section_prefix == "CAMERA_ASPECT_RATIO":
+            min_ratio, max_ratio = map(float, value.split(","))
+            base_config[camera_name] = (min_ratio, max_ratio)
+        else:
+            base_config[camera_name] = int(value)
+
+    # If it's nighttime, try to load night overrides
+    if not is_daytime():
+        night_section = f"NIGHT_{section_prefix}"
+        if config.has_section(night_section):
+            for camera, value in config[night_section].items():
+                camera_name = camera.capitalize()
+                if section_prefix == "CAMERA_ASPECT_RATIO":
+                    min_ratio, max_ratio = map(float, value.split(","))
+                    base_config[camera_name] = (min_ratio, max_ratio)
+                    print(f"🌙 NIGHT override: {camera_name} aspect ratio = ({min_ratio}, {max_ratio})")
+                else:
+                    base_config[camera_name] = int(value)
+                    print(f"🌙 NIGHT override: {camera_name} {section_prefix.split('_')[1]} = {value}")
+        else:
+            print(f"🌙 No night overrides for {section_prefix}, using daytime defaults")
+
+    return base_config
 
 
 # ==========================================
@@ -123,7 +190,6 @@ TOP_EDGE_HIGH_CONF = cfg_float("FILTERS", "TOP_EDGE_HIGH_CONF")
 # Dark Pixel Filter Configuration
 DARKNESS_THRESHOLD = cfg_int("FILTERS", "DARKNESS_THRESHOLD")
 DARK_PIXEL_RATIO = cfg_float("FILTERS", "DARK_PIXEL_RATIO")
-DARK_FILTER_MIN_CONF = cfg_float("FILTERS", "DARK_FILTER_MIN_CONF")
 
 UPLOAD_WORKERS = cfg_int("UPLOAD", "UPLOAD_WORKERS")
 UPLOAD_QUEUE_SIZE = cfg_int("UPLOAD", "UPLOAD_QUEUE_SIZE")
@@ -136,22 +202,25 @@ RESULT_QUEUE_SIZE = cfg_int("UPLOAD", "RESULT_QUEUE_SIZE")
 FILTER_CONFIDENCE = cfg_float("FILTERS", "FILTER_CONFIDENCE")
 
 # ==========================================
-# CAMERA-SPECIFIC CONFIGURATION LOADING
+# CAMERA-SPECIFIC CONFIGURATION LOADING (with day/night support)
 # ==========================================
-CAMERA_MIN_AREA = {
-    camera.capitalize(): int(value)
-    for camera, value in config["CAMERA_MIN_AREA"].items()
-}
+CAMERA_MIN_AREA = load_camera_config("CAMERA_MIN_AREA")
+CAMERA_MAX_AREA = load_camera_config("CAMERA_MAX_AREA")
+CAMERA_ASPECT_RATIOS = load_camera_config("CAMERA_ASPECT_RATIO")
 
-CAMERA_MAX_AREA = {
-    camera.capitalize(): int(value)
-    for camera, value in config["CAMERA_MAX_AREA"].items()
-}
-
-CAMERA_ASPECT_RATIOS = {}
-for camera, value in config["CAMERA_ASPECT_RATIO"].items():
-    min_ratio, max_ratio = map(float, value.split(","))
-    CAMERA_ASPECT_RATIOS[camera.capitalize()] = (min_ratio, max_ratio)
+# Print loaded configuration
+print("\n" + "=" * 60)
+print(f"TIME: {'☀️ DAY' if is_daytime() else '🌙 NIGHT'}")
+print("CAMERA_MIN_AREA (final):")
+for camera, value in CAMERA_MIN_AREA.items():
+    print(f"  {camera} = {value}")
+print("CAMERA_MAX_AREA (final):")
+for camera, value in CAMERA_MAX_AREA.items():
+    print(f"  {camera} = {value}")
+print("CAMERA_ASPECT_RATIOS (final):")
+for camera, value in CAMERA_ASPECT_RATIOS.items():
+    print(f"  {camera} = {value[0]},{value[1]}")
+print("=" * 60)
 
 
 # ==========================================
@@ -418,6 +487,10 @@ class CameraState:
         self.active_session_id = None
         self.last_processed_count = 0
 
+        # Store frames for email (top MAX_IMAGES by confidence)
+        self.session_frames = []
+        self.session_frames_lock = threading.Lock()
+
 camera_states = {n: CameraState() for n in NODES}
 upload_executor = ThreadPoolExecutor(max_workers=UPLOAD_WORKERS, thread_name_prefix="upload")
 
@@ -460,10 +533,16 @@ def session_reset():
             state.last_reset_time = now
             state.active_session_id = None
             state.last_processed_count = 0
+
             if was_waiting:
                 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - DETECTION RESUMED [SID:{old_detection_id}]")
             elif old_count > 0:
                 print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - CLEANED UP PARTIAL SESSION ({old_count}/{MAX_IMAGES} frames) [SID:{old_detection_id}]")
+
+            # Send email with all frames from the session
+            if old_detection_id and old_count > 0:
+                email_executor.submit(send_session_email, camera_name, old_detection_id)
+
         return '', 200
     except Exception as e:
         print(f"Error in session_reset: {e}")
@@ -559,35 +638,56 @@ def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_
         upload_executor.submit(upload_wrapper, camera_name, url, buffer.tobytes(), ts, current_count, max_images, detection_id)
 
 # ==========================================
-# EMAIL ALERT
+# EMAIL ALERT - SEND SESSION EMAIL (ONE PER SESSION)
 # ==========================================
-
-def send_email_alert(camera_name, detection_id, frame_num, max_frames, confidence, frame=None):
+def send_session_email(camera_name, detection_id):
+    """Send email after session reset with ALL frames from the session."""
     if not ENABLE_EMAIL_ALERTS:
         return
 
     if not SMTP_USER or not SMTP_PASS or not ALERT_TO:
         return
 
+    state = camera_states[camera_name]
+
+    # Get all frames from the session
+    with state.session_frames_lock:
+        session_frames = state.session_frames.copy()
+        # Clear after sending to avoid duplicate emails
+        state.session_frames = []
+
+    if not session_frames:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] No frames to send for session {detection_id}")
+        return
+
     try:
         msg = MIMEMultipart()
         msg['From'] = SMTP_USER
         msg['To'] = ALERT_TO
-        msg['Subject'] = f"🚨 CCTV Alert: Person detected on {camera_name}"
+        msg['Subject'] = f"🚨 CCTV Alert: Person detected on {camera_name} (Session {detection_id})"
+
+        # Calculate average confidence
+        avg_conf = sum(f['confidence'] for f in session_frames) / len(session_frames)
 
         body = (
             f"<b>Camera:</b> {camera_name}<br>"
-            f"<b>Session:</b> {detection_id}<br>"
-            f"<b>Frame:</b> {frame_num}/{max_frames}<br>"
-            f"<b>Confidence:</b> {confidence:.0%}<br>"
-            f"<b>Time:</b> {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            f"<b>Session ID:</b> {detection_id}<br>"
+            f"<b>Frames captured:</b> {len(session_frames)}/{MAX_IMAGES}<br>"
+            f"<b>Average Confidence:</b> {avg_conf:.0%}<br>"
+            f"<b>Time:</b> {time.strftime('%Y-%m-%d %H:%M:%S')}<br><br>"
+            f"<i>Attached: All frames from this detection session (sorted by confidence).</i>"
         )
         msg.attach(MIMEText(body, 'html'))
 
-        if frame is not None:
+        # Attach all frames
+        for idx, frame_data in enumerate(session_frames, 1):
+            conf = frame_data['confidence']
+            frame = frame_data['frame']
+            frame_num = frame_data.get('frame_num', idx)
+
             success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
             if success:
-                img = MIMEImage(buffer.tobytes(), name=f"{camera_name}_{detection_id}_{frame_num}.jpg")
+                img = MIMEImage(buffer.tobytes(), name=f"{camera_name}_{detection_id}_frame{frame_num}_conf{conf:.0%}.jpg")
                 msg.attach(img)
 
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
@@ -595,10 +695,113 @@ def send_email_alert(camera_name, detection_id, frame_num, max_frames, confidenc
             server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
 
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ Email sent for {camera_name} - Session {detection_id}")
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ Email sent for {camera_name} - Session {detection_id} ({len(session_frames)} frames)")
 
     except Exception as e:
         print(f"[ERROR] Email alert failed for {camera_name}: {e}")
+
+# ==========================================
+# EMAIL ALERT - SEND REJECTION EMAIL (RATE LIMITED)
+# ==========================================
+def send_rejection_email(camera_name, frame, box, confidence, reason, aspect_ratio=None, area=None, min_value=None):
+    """Send email with rejected image for debugging."""
+    if not ENABLE_EMAIL_ALERTS:
+        return
+
+    if not SMTP_USER or not SMTP_PASS or not ALERT_TO:
+        return
+
+    try:
+        x1, y1, x2, y2 = box
+        width = x2 - x1
+        height = y2 - y1
+
+        # Draw rejection info on image
+        annotated_frame = frame.copy()
+        yellow = (0, 255, 255)  # yellow for rejected
+        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), yellow, 1)
+
+        if reason == "area":
+            text = f"REJECTED: Area too small ({area}px < {min_value}px)"
+            subject = f"⚠️ CCTV Rejection: Area too small on {camera_name}"
+        elif reason == "area_too_large":
+            text = f"REJECTED: Area too large ({area}px > {min_value}px)"
+            subject = f"⚠️ CCTV Rejection: Area too large on {camera_name}"
+        elif reason == "aspect":
+            text = f"REJECTED: Bad aspect ratio ({aspect_ratio:.2f})"
+            subject = f"⚠️ CCTV Rejection: Bad aspect ratio on {camera_name}"
+        elif reason == "top_edge":
+            text = f"REJECTED: Top-edge (y1={y1})"
+            subject = f"⚠️ CCTV Rejection: Top-edge on {camera_name}"
+        elif reason == "dark_pixels":
+            text = f"REJECTED: Too many dark pixels"
+            subject = f"⚠️ CCTV Rejection: Dark pixels on {camera_name}"
+        else:
+            text = f"REJECTED: {reason}"
+            subject = f"⚠️ CCTV Rejection: {reason} on {camera_name}"
+
+        draw_text_with_background(annotated_frame, text, (x1, y1 - 10), 0.5, (0, 255, 255), (0, 0, 0))
+        draw_text_with_background(annotated_frame, f"Conf: {confidence:.2f}", (x1, y1 - 28), 0.4, (0, 255, 255), (0, 0, 0))
+
+
+        #cv2.putText(annotated_frame, text, (x1, y1 - 10),
+        #           cv2.FONT_HERSHEY_SIMPLEX, 0.5, yellow, 1)
+        #cv2.putText(annotated_frame, f"Conf: {confidence:.2f}", (x1, y2 + 15),
+        #           cv2.FONT_HERSHEY_SIMPLEX, 0.4, yellow, 1)
+
+        success, buffer = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+        if not success:
+            return
+
+        msg = MIMEMultipart()
+        msg['From'] = SMTP_USER
+        msg['To'] = ALERT_TO
+        msg['Subject'] = subject
+
+        body = (
+            f"<b>Camera:</b> {camera_name}<br>"
+            f"<b>Reason:</b> {text}<br>"
+            f"<b>Confidence:</b> {confidence:.0%}<br>"
+            f"<b>Box:</b> {width}x{height}px<br>"
+            f"<b>Time:</b> {time.strftime('%Y-%m-%d %H:%M:%S')}"
+        )
+        msg.attach(MIMEText(body, 'html'))
+
+        img = MIMEImage(buffer.tobytes(), name=f"rejected_{camera_name}_{reason}.jpg")
+        msg.attach(img)
+
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
+            server.send_message(msg)
+
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📧 Rejection email sent for {camera_name}: {reason}")
+
+    except Exception as e:
+        print(f"[ERROR] Rejection email failed for {camera_name}: {e}")
+
+# ==========================================
+# CONFIGURATION RELOAD THREAD (for day/night switching)
+# ==========================================
+def config_reload_thread():
+    """Reload camera configurations every hour to handle day/night transitions."""
+    global CAMERA_MIN_AREA, CAMERA_MAX_AREA, CAMERA_ASPECT_RATIOS
+
+    while True:
+        time.sleep(3600)  # Check every hour
+
+        # Reload configurations
+        new_min_area = load_camera_config("CAMERA_MIN_AREA")
+
+        # Only update if changed (avoid unnecessary updates)
+        if CAMERA_MIN_AREA != new_min_area:
+            CAMERA_MIN_AREA = new_min_area
+            CAMERA_MAX_AREA = load_camera_config("CAMERA_MAX_AREA")
+            CAMERA_ASPECT_RATIOS = load_camera_config("CAMERA_ASPECT_RATIO")
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Camera configs updated for {'DAY' if is_daytime() else 'NIGHT'}")
+
+# Start config reload thread
+threading.Thread(target=config_reload_thread, daemon=True).start()
 
 # ==========================================
 # YOLO WORKER PROCESS
@@ -624,6 +827,9 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
     _last_topedge_save_time = {}       # Top-edge rejection save timer
     _last_dark_save_time = {}          # Dark pixel rejection save timer
 
+    # Timers for rejection email (rate-limited to 5 minutes per camera)
+    _last_rejection_email_time = {}
+
     _log_lock = threading.Lock()
 
     def is_valid_person_detection_worker(camera_name, box, confidence, image_height, frame_id=None, original_frame=None):
@@ -640,15 +846,14 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
 
         # ==========================================
         # HIGH CONFIDENCE BYPASS
-        # If confidence is high enough, accept immediately
         # ==========================================
         if confidence >= FILTER_CONFIDENCE:
             return True
 
         # ==========================================
-        # DARK PIXEL FILTER (only for low confidence detections - saves CPU)
+        # DARK PIXEL FILTER
         # ==========================================
-        if enable_dark_filter and confidence < DARK_FILTER_MIN_CONF:
+        if enable_dark_filter and confidence < FILTER_CONFIDENCE:
             if is_dark_detection(original_frame, box, DARKNESS_THRESHOLD, DARK_PIXEL_RATIO):
                 with _log_lock:
                     now = time.time()
@@ -668,12 +873,20 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                         dark_percent = int(DARK_PIXEL_RATIO * 100)
                         save_rejected_image(camera_name, original_frame, box, confidence, "dark_pixels",
                                           min_value=dark_percent)
+
+                # Rate-limited rejection email (1 per 5 minutes per camera)
+                if original_frame is not None:
+                    now = time.time()
+                    last_email = _last_rejection_email_time.get(camera_name, 0)
+                    if now - last_email >= 300:
+                        _last_rejection_email_time[camera_name] = now
+                        email_executor.submit(send_rejection_email, camera_name, original_frame, box, confidence, "dark_pixels")
                 return False
 
         # ==========================================
         # MIN AREA FILTER (too small)
         # ==========================================
-        if enable_area_filter and area < min_area and confidence < FILTER_CONFIDENCE:
+        if enable_area_filter and area < min_area:
             with _log_lock:
                 now = time.time()
                 last_time = _last_area_log_time.get(camera_name, 0)
@@ -690,12 +903,21 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                     _last_area_save_time[camera_name] = now
                     save_rejected_image(camera_name, original_frame, box, confidence, "area",
                                       area=area, min_value=min_area)
+
+            # Rate-limited rejection email
+            if original_frame is not None:
+                now = time.time()
+                last_email = _last_rejection_email_time.get(camera_name, 0)
+                if now - last_email >= 300:
+                    _last_rejection_email_time[camera_name] = now
+                    email_executor.submit(send_rejection_email, camera_name, original_frame, box, confidence, "area",
+                                         area=area, min_value=min_area)
             return False
 
         # ==========================================
-        # MAX AREA FILTER (too large - headlights, vehicles)
+        # MAX AREA FILTER (too large)
         # ==========================================
-        if max_area is not None and area > max_area and confidence < FILTER_CONFIDENCE:
+        if max_area is not None and area > max_area:
             with _log_lock:
                 now = time.time()
                 last_time = _last_maxarea_log_time.get(camera_name, 0)
@@ -712,6 +934,15 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                     _last_maxarea_save_time[camera_name] = now
                     save_rejected_image(camera_name, original_frame, box, confidence, "area_too_large",
                                       area=area, min_value=max_area)
+
+            # Rate-limited rejection email
+            if original_frame is not None:
+                now = time.time()
+                last_email = _last_rejection_email_time.get(camera_name, 0)
+                if now - last_email >= 300:
+                    _last_rejection_email_time[camera_name] = now
+                    email_executor.submit(send_rejection_email, camera_name, original_frame, box, confidence, "area_too_large",
+                                         area=area, min_value=max_area)
             return False
 
         # ==========================================
@@ -719,7 +950,7 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
         # ==========================================
         if enable_aspect_filter and width > 0:
             aspect_ratio = height / width
-            if (aspect_ratio < min_ratio or aspect_ratio > max_ratio) and confidence < FILTER_CONFIDENCE:
+            if aspect_ratio < min_ratio or aspect_ratio > max_ratio:
                 with _log_lock:
                     now = time.time()
                     last_time = _last_aspect_log_time.get(camera_name, 0)
@@ -735,6 +966,15 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                         _last_aspect_save_time[camera_name] = now
                         save_rejected_image(camera_name, original_frame, box, confidence, "aspect",
                                           aspect_ratio=aspect_ratio)
+
+                # Rate-limited rejection email
+                if original_frame is not None:
+                    now = time.time()
+                    last_email = _last_rejection_email_time.get(camera_name, 0)
+                    if now - last_email >= 300:
+                        _last_rejection_email_time[camera_name] = now
+                        email_executor.submit(send_rejection_email, camera_name, original_frame, box, confidence, "aspect",
+                                             aspect_ratio=aspect_ratio)
                 return False
 
         # ==========================================
@@ -761,6 +1001,14 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                             _last_topedge_save_time[camera_name] = now
                             save_rejected_image(camera_name, original_frame, box, confidence, "top_edge",
                                               top_y=top_y, min_conf=TOP_EDGE_HIGH_CONF)
+
+                    # Rate-limited rejection email
+                    if original_frame is not None:
+                        now = time.time()
+                        last_email = _last_rejection_email_time.get(camera_name, 0)
+                        if now - last_email >= 300:
+                            _last_rejection_email_time[camera_name] = now
+                            email_executor.submit(send_rejection_email, camera_name, original_frame, box, confidence, "top_edge")
                     return False
                 else:
                     with _log_lock:
@@ -1024,7 +1272,7 @@ if __name__ == "__main__":
     print(f"TOP_EDGE_FILTER: {ENABLE_TOP_EDGE_FILTER} (margin={TOP_EDGE_MARGIN}px, high_conf={TOP_EDGE_HIGH_CONF})")
     print(f"AREA_FILTER: {ENABLE_AREA_FILTER}")
     print(f"ASPECT_FILTER: {ENABLE_ASPECT_FILTER}")
-    print(f"DARK_FILTER: {ENABLE_DARK_FILTER} (threshold={DARKNESS_THRESHOLD}, ratio={DARK_PIXEL_RATIO:.0%}, min_conf={DARK_FILTER_MIN_CONF})")
+    print(f"DARK_FILTER: {ENABLE_DARK_FILTER} (threshold={DARKNESS_THRESHOLD}, ratio={DARK_PIXEL_RATIO:.0%}, min_conf={FILTER_CONFIDENCE})")
     print(f"MAX_AREA_FILTER: Enabled (per-camera thresholds)")
     print(f"DEBUG_LOG_INTERVAL: {DEBUG_LOG_INTERVAL}s")
     print(f"ENABLE_DEBUG_PRINTS: {ENABLE_DEBUG_PRINTS}")
@@ -1102,6 +1350,9 @@ if __name__ == "__main__":
                     if state.count == 0:
                         state.detection_id = str(uuid.uuid4())[:8]
                         state.active_session_id = state.detection_id
+                        # Clear previous session frames
+                        with state.session_frames_lock:
+                            state.session_frames = []
                         print(f"[{ts}] 🆔 {name}: New detection session {state.detection_id}")
 
                     state.count += 1
@@ -1118,17 +1369,24 @@ if __name__ == "__main__":
 
                     print(f"[{ts}] ⚡ >>> {name}: {state.count}/{MAX_IMAGES} [SID:{detection_id}] conf={conf:.2f} box={width}x{height}px area={width*height}px {y1}px")
 
+                    # Store frame for email (keep only top MAX_IMAGES by confidence)
+                    with state.session_frames_lock:
+                        state.session_frames.append({
+                            'confidence': conf,
+                            'frame': frame.copy(),
+                            'timestamp': ts,
+                            'frame_num': state.count
+                        })
+                        # Keep only top MAX_IMAGES (sorted by confidence)
+                        state.session_frames.sort(key=lambda x: x['confidence'], reverse=True)
+                        state.session_frames = state.session_frames[:MAX_IMAGES]
+
                 if current_count is None or detection_id is None:
                     continue
 
                 if frame is not None:
                     draw_and_upload(name, NODES[name]["rpi_url"], frame, detections, ts,
                                   current_count, MAX_IMAGES, detection_id)
-                    # Send email alert using dedicated executor
-                    conf = detections[0]['conf'] if detections else 0
-                    email_executor.submit(
-                        send_email_alert, name, detection_id, current_count, MAX_IMAGES, conf, frame.copy()
-                    )
 
                 with state.lock:
                     state.last_upload = now
