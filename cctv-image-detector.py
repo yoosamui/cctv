@@ -1,25 +1,45 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.25.0
+# CCTV IMAGE DETECTOR - VERSION 3.25.4  cloude+deepseek
 # ==============================================================================
 #
-# IMPROVEMENTS in v3.25.0:
-#   1. Day/Night hierarchical configuration support
-#      - Base daytime defaults in CAMERA_* sections
-#      - Night overrides in NIGHT_CAMERA_* sections (only changed values needed)
-#      - Automatic switching based on system time
-#   2. Added merge_camera_config() and load_camera_config() helper functions
-#   3. Periodic config reload thread (checks every hour for day/night transition)
+# IMPROVEMENTS in v3.25.4:
+#   1. Fixed continuous-presence session spam: a person standing still no longer
+#      spawns a new detection session every few seconds. After a session captures
+#      MAX_IMAGES frames the camera parks in WAITING_RESET and resumes only when
+#      the recorder's /session-reset arrives (one session per recording segment).
+#   2. This also fixes pending-email loss: only one session can complete per reset
+#      cycle, so pending_emails[camera] can no longer be overwritten before sending.
+#   3. YOLO worker reloads its own day/night camera config on transition (the
+#      worker is a separate process and never saw the main process's updates).
+#   4. Removed hardcoded THREAD POOL SETTINGS that overwrote config.ini values;
+#      removed unused merge_camera_config() helper.
 #
-# IMPROVEMENTS in v3.24.9:
-#   1. Changed email alerts: send ONE email per session (after reset) instead of per frame
-#   2. Email now includes ALL frames from the session (up to MAX_IMAGES)
-#   3. Added session_frames buffer in CameraState to store frames for email
-#   4. Frames are sorted by confidence, best frames kept for email
-#   5. Added rejection emails for false positives (rate-limited to 1 per 5 minutes per camera)
+# IMPROVEMENTS in v3.25.3:
+#   1. Fixed session watchdog to use separate timeouts for different purposes
+#      - ACTIVE_SESSION_IDLE_TIMEOUT (60s): How long an incomplete session can go
+#        without a new detection before it's considered abandoned
+#      - SESSION_TIMEOUT (300s): Legacy timeout for WAITING_RESET state (safety)
+#      - Partial sessions now saved as pending emails when they timeouta
+#   2. Added ACTIVE_SESSION_IDLE_TIMEOUT config option with 60s default
+#
+# IMPROVEMENTS in v3.25.2:
+#   1. Decoupled image capture from email sending
+#      - Camera returns to IDLE immediately after 3/3 frames are captured
+#      - New detections can start right away on the same camera
+#      - Email is held in a PendingEmail object and fired when the recorder
+#        sends its /session-reset signal (end of 5-minute segment)
+#      - PendingEmail watchdog expires and sends email after 360s if the
+#        recorder reset never arrives (e.g. crash / missed signal)
+#   2. Cleaned up CameraStream class (removed duplicate methods)
+#   3. Fixed email sending from main process only
+#
+# IMPROVEMENTS in v3.25.1:
+#   1. Fixed rate limiting logic - now correctly processes frames at ANALYSIS_INTERVAL
+#   2. Improved debug logging for frame timing
 #
 # AUTHOR: yoosamui
-# DATE: 2026-06-04
+# DATE: 2026-06-05
 # ==============================================================================
 import glob
 import cv2
@@ -47,7 +67,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 
-VERSION = "3.25.0"
+VERSION = "3.25.4"
 
 # ==========================================
 # SILENCE LOGS
@@ -97,15 +117,6 @@ def is_daytime():
     current_hour = now.hour
     return DAY_START_HOUR <= current_hour < DAY_END_HOUR
 
-def merge_camera_config(base_dict, override_dict):
-    """
-    Merge two camera configuration dictionaries.
-    override_dict takes precedence over base_dict.
-    """
-    result = base_dict.copy()
-    result.update(override_dict)
-    return result
-
 def load_camera_config(section_prefix):
     """
     Load camera configuration with support for day/night overrides.
@@ -135,12 +146,12 @@ def load_camera_config(section_prefix):
                 if section_prefix == "CAMERA_ASPECT_RATIO":
                     min_ratio, max_ratio = map(float, value.split(","))
                     base_config[camera_name] = (min_ratio, max_ratio)
-                    print(f"🌙 NIGHT override: {camera_name} aspect ratio = ({min_ratio}, {max_ratio})")
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🌙 NIGHT override: {camera_name} aspect ratio = ({min_ratio}, {max_ratio})")
                 else:
                     base_config[camera_name] = int(value)
-                    print(f"🌙 NIGHT override: {camera_name} {section_prefix.split('_')[1]} = {value}")
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🌙 NIGHT override: {camera_name} {section_prefix.split('_')[1]} = {value}")
         else:
-            print(f"🌙 No night overrides for {section_prefix}, using daytime defaults")
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🌙 No night overrides for {section_prefix}, using daytime defaults")
 
     return base_config
 
@@ -163,6 +174,13 @@ JPEG_QUALITY = cfg_int("IMAGE", "JPEG_QUALITY")
 DRAW_BOUNDING_BOXES = cfg_bool("IMAGE", "DRAW_BOUNDING_BOXES")
 
 SESSION_TIMEOUT = cfg_int("SESSION", "SESSION_TIMEOUT")
+# New: ACTIVE_SESSION_IDLE_TIMEOUT - how long an incomplete session can go without detections
+try:
+    ACTIVE_SESSION_IDLE_TIMEOUT = cfg_int("SESSION", "ACTIVE_SESSION_IDLE_TIMEOUT")
+except (configparser.NoOptionError, KeyError):
+    ACTIVE_SESSION_IDLE_TIMEOUT = 60
+    print(f"[INFO] ACTIVE_SESSION_IDLE_TIMEOUT not found in config, using default: {ACTIVE_SESSION_IDLE_TIMEOUT}s")
+
 WATCHDOG_TIMEOUT = cfg_int("SESSION", "WATCHDOG_TIMEOUT")
 WATCHDOG_CHECK = cfg_int("SESSION", "WATCHDOG_CHECK")
 RESET_DEDUP_WINDOW = cfg_int("SESSION", "RESET_DEDUP_WINDOW")
@@ -187,7 +205,6 @@ MAX_ASPECT_RATIO = cfg_float("FILTERS", "MAX_ASPECT_RATIO")
 TOP_EDGE_MARGIN = cfg_int("FILTERS", "TOP_EDGE_MARGIN")
 TOP_EDGE_HIGH_CONF = cfg_float("FILTERS", "TOP_EDGE_HIGH_CONF")
 
-# Dark Pixel Filter Configuration
 DARKNESS_THRESHOLD = cfg_int("FILTERS", "DARKNESS_THRESHOLD")
 DARK_PIXEL_RATIO = cfg_float("FILTERS", "DARK_PIXEL_RATIO")
 
@@ -231,7 +248,6 @@ def ensure_rejected_dir():
     if SAVE_REJECTED_IMAGES:
         try:
             os.makedirs(REJECTED_IMAGES_DIR, exist_ok=True)
-
             existing = glob.glob(os.path.join(REJECTED_IMAGES_DIR, "*.jpg"))
             if len(existing) > MAX_REJECTED_IMAGES:
                 existing.sort()
@@ -251,23 +267,17 @@ def draw_text_with_background(img, text, position, font_scale, bg_color, text_co
     """Draw text with a colored background rectangle."""
     x, y = position
     (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
-
     padding = 4
-    # Draw background rectangle (filled)
     cv2.rectangle(img,
                   (x - padding, y - text_h - padding),
                   (x + text_w + padding, y + padding),
                   bg_color,
                   -1)
-
-    # Draw text
     cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, text_color, thickness)
 
 def draw_text_safe(img, text, x, y, font_scale, color, thickness=1):
     """Draw text safely within image boundaries."""
     (text_w, text_h), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
-
-    # Ensure text stays within image
     if x + text_w > img.shape[1]:
         x = img.shape[1] - text_w - 5
     if x < 0:
@@ -276,53 +286,41 @@ def draw_text_safe(img, text, x, y, font_scale, color, thickness=1):
         y = text_h + 5
     if y > img.shape[0]:
         y = img.shape[0] - 5
-
     cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
 
-def save_rejected_image(camera_name, frame, box, confidence, reason, aspect_ratio=None, area=None, min_value=None, top_y=None, min_conf=None):
-    """Save rejected detection image for debugging with clean filename format"""
-
+def save_rejected_image(camera_name, frame, box, confidence, reason,
+                        aspect_ratio=None, area=None, min_value=None,
+                        top_y=None, min_conf=None):
+    """Save rejected detection image for debugging."""
     if not SAVE_REJECTED_IMAGES:
         return
-
     try:
         ensure_rejected_dir()
-
         x1, y1, x2, y2 = box
         width = x2 - x1
         height = y2 - y1
-
-        # Get image dimensions
         img_height, img_width = frame.shape[:2]
-
-        # Draw rejection info on image
         debug_frame = frame.copy()
         yellow = (0, 255, 255)
-        cv2.rectangle(debug_frame, (x1, y1), (x2, y2), yellow, 2)
-
+        cv2.rectangle(debug_frame, (x1, y1), (x2, y2), yellow, 1)
         timestamp = time.strftime('%Y-%m-%d_%H%M%S')
 
         if reason == "area":
-            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Area too small ({area}px < {min_value}px) - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
+            filename = f"[{timestamp}]_{camera_name}_area_small_{area}px_conf{confidence:.2f}.jpg"
         elif reason == "area_too_large":
-            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Area too large ({area}px > {min_value}px) - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
+            filename = f"[{timestamp}]_{camera_name}_area_large_{area}px_conf{confidence:.2f}.jpg"
         elif reason == "aspect":
             ar = aspect_ratio if aspect_ratio is not None else 0
-            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Bad aspect ratio ({ar:.2f}) - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
+            filename = f"[{timestamp}]_{camera_name}_aspect_{ar:.2f}_conf{confidence:.2f}.jpg"
         elif reason == "top_edge":
-            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Top-edge rejection - y1={top_y}, conf={confidence:.2f}<{min_conf} - box: {width}x{height}px REJECTED.jpg"
+            filename = f"[{timestamp}]_{camera_name}_topedge_y{top_y}_conf{confidence:.2f}.jpg"
         elif reason == "dark_pixels":
-            dark_percent = int(DARK_PIXEL_RATIO * 100)
-            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Too many dark pixels ({min_value}% > {dark_percent}%) - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
+            filename = f"[{timestamp}]_{camera_name}_dark_conf{confidence:.2f}.jpg"
         else:
-            filename = f"[{timestamp}] _[DEBUG] {camera_name}: {reason} - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
+            filename = f"[{timestamp}]_{camera_name}_{reason}_conf{confidence:.2f}.jpg"
 
-        filename = filename.replace(" ", "_").replace(":", "-")
         filepath = os.path.join(REJECTED_IMAGES_DIR, filename)
 
-        # ==========================================
-        # CREATE TEXT LINES (ORDERED CORRECTLY)
-        # ==========================================
         if reason == "area":
             line1 = f"REJECTED: Area too small ({area}px < {min_value}px)"
         elif reason == "area_too_large":
@@ -341,17 +339,11 @@ def save_rejected_image(camera_name, frame, box, confidence, reason, aspect_rati
         line2 = f"Detection Conf: {confidence:.2f}"
         line3 = f"YOLO Threshold: {YOLO_CONFIDENCE:.2f}"
         line4 = f"Filter Threshold: {FILTER_CONFIDENCE:.2f}"
-
         lines = [line1, line2, line3, line4]
 
-        # ==========================================
-        # FIND BEST TEXT POSITION
-        # ==========================================
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.5
         thickness = 1
-
-        # Get max text width
         max_width = 0
         line_heights = []
         for line in lines:
@@ -361,50 +353,34 @@ def save_rejected_image(camera_name, frame, box, confidence, reason, aspect_rati
 
         line_spacing = 22
         total_text_height = sum(line_heights) + (len(lines) - 1) * line_spacing
-
-        # Try positions in order: right, left, below
         text_x = x2 + 10
         text_y = y1 + line_heights[0]
 
-        # Check right side
         if text_x + max_width > img_width:
-            # Try left side
             text_x = x1 - max_width - 10
             if text_x < 0:
-                # Put below
                 text_x = x1
                 text_y = y2 + line_heights[0] + 10
 
-        # Ensure text doesn't go off bottom
         if text_y + total_text_height > img_height:
             text_y = max(line_heights[0] + 5, img_height - total_text_height - 10)
-
-        # Ensure text doesn't go off top
         if text_y - line_heights[0] < 0:
             text_y = line_heights[0] + 5
 
-        # ==========================================
-        # DRAW TEXT WITH BACKGROUND
-        # ==========================================
         for i, line in enumerate(lines):
             (w, h), _ = cv2.getTextSize(line, font, font_scale, thickness)
             y_pos = text_y + i * line_spacing
-
-            # Draw yellow background
             cv2.rectangle(debug_frame,
                          (text_x - 3, y_pos - h - 2),
                          (text_x + w + 3, y_pos + 2),
-                         (0, 255, 255),
-                         -1)
-
-            # Draw black text
+                         (0, 255, 255), -1)
             cv2.putText(debug_frame, line, (text_x, y_pos), font, font_scale, (0, 0, 0), thickness)
 
         cv2.imwrite(filepath, debug_frame)
-        print(f"[DEBUG] Saved rejected image: {filepath}")
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [DEBUG] Saved rejected image: {filepath}")
 
     except Exception as e:
-        print(f"[ERROR] save_rejected_image failed for {camera_name}: {e}")
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] [ERROR] save_rejected_image failed for {camera_name}: {e}")
         import traceback
         traceback.print_exc()
 
@@ -414,21 +390,9 @@ def save_rejected_image(camera_name, frame, box, confidence, reason, aspect_rati
 # ==========================================
 def is_dark_detection(frame, box, darkness_threshold=50, dark_pixel_ratio=0.3):
     """
-    Check if a detection contains too many dark pixels (shadows, headlights, false positives).
-    Uses OpenCV for fast pixel analysis (no Python loops).
-
-    Args:
-        frame: Original frame (BGR)
-        box: Bounding box [x1, y1, x2, y2]
-        darkness_threshold: Pixel value < this is considered dark (0-255)
-        dark_pixel_ratio: Reject if > this percentage of pixels are dark (0.0-1.0)
-
-    Returns:
-        True if detection is too dark (should be rejected)
+    Check if a detection contains too many dark pixels.
     """
     x1, y1, x2, y2 = box
-
-    # Ensure coordinates are within frame bounds
     x1 = max(0, x1)
     y1 = max(0, y1)
     x2 = min(frame.shape[1], x2)
@@ -437,35 +401,17 @@ def is_dark_detection(frame, box, darkness_threshold=50, dark_pixel_ratio=0.3):
     if x2 <= x1 or y2 <= y1:
         return False
 
-    # Extract region of interest
     roi = frame[y1:y2, x1:x2]
-
     if roi.size == 0:
         return False
 
-    # Convert to grayscale (fast)
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-
-    # Count dark pixels using OpenCV (very fast)
     _, dark_mask = cv2.threshold(gray, darkness_threshold, 255, cv2.THRESH_BINARY_INV)
     dark_pixels = cv2.countNonZero(dark_mask)
     total_pixels = roi.shape[0] * roi.shape[1]
-
     dark_ratio = dark_pixels / total_pixels if total_pixels > 0 else 0
-
     return dark_ratio > dark_pixel_ratio
 
-
-# ==========================================
-# THREAD POOL SETTINGS
-# ==========================================
-UPLOAD_WORKERS = 2
-UPLOAD_QUEUE_SIZE = 20
-YOLO_RESTART_DELAY = 5
-UPLOAD_MAX_RETRIES = 3
-UPLOAD_RETRY_DELAY_BASE = 2
-TASK_QUEUE_SIZE = 10
-RESULT_QUEUE_SIZE = 20
 
 # ==========================================
 # SESSION STATE ENUM
@@ -473,8 +419,27 @@ RESULT_QUEUE_SIZE = 20
 class SessionState(Enum):
     IDLE = 0
     ACTIVE = 1
-    WAITING_RESET = 2
+    WAITING_RESET = 2   # kept for watchdog compatibility but no longer used on hot path
     COMPLETED = 3
+
+# ==========================================
+# PENDING EMAIL
+# Holds captured frames after a session completes, waiting for the recorder's
+# /session-reset signal before sending the email.  The camera itself returns
+# to IDLE immediately so new detections are not blocked.
+# ==========================================
+class PendingEmail:
+    def __init__(self, camera_name, detection_id, frames, frame_count):
+        self.camera_name = camera_name
+        self.detection_id = detection_id
+        self.frames = frames          # list of {'confidence', 'frame', 'timestamp', 'frame_num'}
+        self.frame_count = frame_count
+        self.created_at = time.time()
+
+# Global dict: camera_name -> PendingEmail
+# Protected by pending_emails_lock
+pending_emails = {}
+pending_emails_lock = threading.Lock()
 
 # ==========================================
 # THREAD-SAFE METRICS COLLECTOR
@@ -528,7 +493,9 @@ if not CAM_PASS:
 password = quote(CAM_PASS)
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change-this-default-secret")
-os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|timeout;5000000"
+os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+    "rtsp_transport;tcp|timeout;5000000|reorder_queue_size;1024|buffer_size;1024000"
+)
 
 # ==========================================
 # EMAIL ALERT CONFIGURATION
@@ -578,7 +545,7 @@ class CameraState:
 camera_states = {n: CameraState() for n in NODES}
 upload_executor = ThreadPoolExecutor(max_workers=UPLOAD_WORKERS, thread_name_prefix="upload")
 
-# Create a separate executor for email alerts (non-critical)
+# Separate executor for email alerts (non-critical, main process only)
 email_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="email")
 
 # ==========================================
@@ -590,6 +557,11 @@ def verify_auth():
     api_key = request.headers.get('X-API-KEY')
     return api_key and api_key == WEBHOOK_SECRET
 
+# ==========================================
+# SESSION RESET WEBHOOK
+# The camera is already back to IDLE when this arrives.
+# This handler's only job is to fire the pending email.
+# ==========================================
 @app.route('/session-reset', methods=['POST'])
 def session_reset():
     if not verify_auth():
@@ -601,32 +573,53 @@ def session_reset():
         camera_name = data.get('camera')
         if not camera_name or camera_name not in camera_states:
             return jsonify({"status": "ok"}), 200
-        state = camera_states[camera_name]
+
         now = time.time()
+        state = camera_states[camera_name]
+
+        # Dedup guard — ignore duplicate signals within RESET_DEDUP_WINDOW
         with state.lock:
             if now - state.last_reset_processed < RESET_DEDUP_WINDOW:
                 return '', 200
             state.last_reset_processed = now
-            was_waiting = (state.state == SessionState.WAITING_RESET)
-            old_count = state.count
-            old_detection_id = state.detection_id
+            state.last_reset_time = now
+
+            # If a session was still mid-capture (frames collected but never
+            # reached MAX_IMAGES), the recorder segment is ending now — save
+            # those frames as the pending email for this segment instead of
+            # discarding them. A completed session already moved its frames to
+            # pending_emails and left count==0, so this is skipped for those.
+            if state.count > 0 and state.detection_id:
+                with state.session_frames_lock:
+                    frames_copy = state.session_frames.copy()
+                    state.session_frames = []
+                if frames_copy:
+                    with pending_emails_lock:
+                        pending_emails[camera_name] = PendingEmail(
+                            camera_name, state.detection_id, frames_copy, len(frames_copy)
+                        )
+
+            # Resume detection: a completed session parks the camera in
+            # WAITING_RESET until this signal arrives. Clear it so the camera
+            # can detect again. COOLDOWN still applies via last_reset_time.
             state.state = SessionState.COMPLETED
             state.count = 0
             state.detection_id = None
-            state.last_waiting_start = 0
-            state.last_reset_time = now
             state.active_session_id = None
             state.last_processed_count = 0
+            state.last_waiting_start = 0
 
-            if was_waiting:
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - DETECTION RESUMED [SID:{old_detection_id}]")
-            elif old_count > 0:
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset - CLEANED UP PARTIAL SESSION ({old_count}/{MAX_IMAGES} frames) [SID:{old_detection_id}]")
+        # Claim pending email (if any) and fire it
+        with pending_emails_lock:
+            pending = pending_emails.pop(camera_name, None)
 
-            # Send email with all frames from the session
-            if old_detection_id and old_count > 0:
-                email_executor.submit(send_session_email, camera_name, old_detection_id)
-
+        if pending:
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset "
+                  f"- sending email [SID:{pending.detection_id}] ({pending.frame_count} frames)")
+            email_executor.submit(send_session_email_from_pending, pending)
+        else:
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📡 Recorder signaled: {camera_name} reset "
+                  f"- no pending email (camera already idle)")
 
         return '', 200
     except Exception as e:
@@ -645,10 +638,21 @@ def health_check():
     for name, state in camera_states.items():
         with state.lock:
             camera_stats[name] = {"state": state.state.name, "count": state.count}
-    return jsonify({"status": "running", "version": VERSION, "cameras": camera_stats}), 200
+    with pending_emails_lock:
+        pending_count = len(pending_emails)
+    return jsonify({
+        "status": "running",
+        "version": VERSION,
+        "cameras": camera_stats,
+        "pending_emails": pending_count
+    }), 200
 
 def start_webhook_server():
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=WEBHOOK_PORT, debug=False, use_reloader=False, threaded=True), daemon=True).start()
+    threading.Thread(
+        target=lambda: app.run(host='0.0.0.0', port=WEBHOOK_PORT,
+                               debug=False, use_reloader=False, threaded=True),
+        daemon=True
+    ).start()
     print(f"🌐 Webhook server on port {WEBHOOK_PORT}")
 
 # ==========================================
@@ -666,22 +670,56 @@ def upload_task(camera_name, url, image_buffer, ts, current_count, max_images, d
     for attempt in range(max_retries):
         try:
             files = {'image': (f"{camera_name}_{ts}.jpg", image_buffer, 'image/jpeg')}
-            data = {'frame_num': current_count, 'total_frames': max_images, 'camera': camera_name, 'detection_id': detection_id}
+            data = {
+                'frame_num': current_count,
+                'total_frames': max_images,
+                'camera': camera_name,
+                'detection_id': detection_id
+            }
             headers = {'X-API-KEY': WEBHOOK_SECRET}
             response = requests.post(url, files=files, data=data, headers=headers, timeout=5)
             response.raise_for_status()
 
+            # On last frame, return camera to IDLE immediately and register a PendingEmail.
             if current_count == max_images:
                 with state.lock:
                     if (state.state == SessionState.ACTIVE and
-                        state.active_session_id == original_session_id and
-                        state.detection_id == detection_id):
+                            state.active_session_id == original_session_id and
+                            state.detection_id == detection_id):
+
+                        # Collect frames before clearing state
+                        with state.session_frames_lock:
+                            frames_copy = state.session_frames.copy()
+                            state.session_frames = []
+
+                        frame_count = len(frames_copy)
+
+                        # Register pending email
+                        with pending_emails_lock:
+                            pending_emails[camera_name] = PendingEmail(
+                                camera_name, detection_id, frames_copy, frame_count
+                            )
+
+                        # Park in WAITING_RESET so a continuously-present person does
+                        # not spawn a new session every few seconds. The camera resumes
+                        # detection only when the recorder's /session-reset arrives (one
+                        # session per recording segment). Frame bookkeeping is cleared
+                        # because the frames now live in pending_emails.
+                        old_sid = state.detection_id
                         state.state = SessionState.WAITING_RESET
                         state.last_waiting_start = time.time()
-                        print(f"[{ts}] 🛑 {camera_name}: Last frame sent ({current_count}/{max_images}) [SID:{detection_id}]")
+                        state.count = 0
+                        state.detection_id = None
+                        state.active_session_id = None
+                        state.last_processed_count = 0
+
+                        print(f"[{ts}] 🛑 {camera_name}: Last frame sent ({current_count}/{max_images}) "
+                              f"[SID:{old_sid}] — waiting for recorder reset (no new sessions until then)")
                     else:
-                        print(f"[{ts}] ⚠️ {camera_name}: Session changed during upload, skipping state change [SID:{detection_id}]")
+                        print(f"[{ts}] ⚠️ {camera_name}: Session changed during upload, "
+                              f"skipping state change [SID:{detection_id}]")
             return
+
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 429 and attempt < max_retries - 1:
                 wait_time = UPLOAD_RETRY_DELAY_BASE * (attempt + 1)
@@ -690,7 +728,7 @@ def upload_task(camera_name, url, image_buffer, ts, current_count, max_images, d
                 break
             else:
                 break
-        except Exception as e:
+        except Exception:
             if attempt < max_retries - 1:
                 time.sleep(UPLOAD_RETRY_DELAY_BASE)
             else:
@@ -720,27 +758,22 @@ def draw_and_upload(camera_name, url, frame, detections, ts, current_count, max_
                 return upload_task(*args, **kwargs)
             finally:
                 metrics.dec_pending_uploads()
-        upload_executor.submit(upload_wrapper, camera_name, url, buffer.tobytes(), ts, current_count, max_images, detection_id)
+        upload_executor.submit(upload_wrapper, camera_name, url, buffer.tobytes(),
+                               ts, current_count, max_images, detection_id)
 
 # ==========================================
-# EMAIL ALERT - SEND SESSION EMAIL (ONE PER SESSION)
+# EMAIL — SEND SESSION EMAIL FROM PENDING
 # ==========================================
-def send_session_email(camera_name, detection_id):
-    """Send email after session reset with ALL frames from the session."""
+def send_session_email_from_pending(pending: PendingEmail):
+    """Unwrap PendingEmail and delegate to send_session_email."""
+    send_session_email(pending.camera_name, pending.detection_id, pending.frames)
+
+def send_session_email(camera_name, detection_id, session_frames):
+    """Send one email per session with all captured frames."""
     if not ENABLE_EMAIL_ALERTS:
         return
-
     if not SMTP_USER or not SMTP_PASS or not ALERT_TO:
         return
-
-    state = camera_states[camera_name]
-
-    # Get all frames from the session
-    with state.session_frames_lock:
-        session_frames = state.session_frames.copy()
-        # Clear after sending to avoid duplicate emails
-        state.session_frames = []
-
     if not session_frames:
         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] No frames to send for session {detection_id}")
         return
@@ -749,9 +782,9 @@ def send_session_email(camera_name, detection_id):
         msg = MIMEMultipart()
         msg['From'] = SMTP_USER
         msg['To'] = ALERT_TO
-        msg['Subject'] = f"🚨 CCTV Alert: Person detected on {camera_name} (Session {detection_id})"
+        msg['Subject'] = (f"🚨 CCTV Alert: Person detected on {camera_name} "
+                          f"(Session {detection_id})")
 
-        # Calculate average confidence
         avg_conf = sum(f['confidence'] for f in session_frames) / len(session_frames)
 
         body = (
@@ -760,19 +793,21 @@ def send_session_email(camera_name, detection_id):
             f"<b>Frames captured:</b> {len(session_frames)}/{MAX_IMAGES}<br>"
             f"<b>Average Confidence:</b> {avg_conf:.0%}<br>"
             f"<b>Time:</b> {time.strftime('%Y-%m-%d %H:%M:%S')}<br><br>"
-            f"<i>Attached: All frames from this detection session (sorted by confidence).</i>"
+            f"<i>Attached: All frames from this detection session "
+            f"(sorted by confidence).</i>"
         )
         msg.attach(MIMEText(body, 'html'))
 
-        # Attach all frames
         for idx, frame_data in enumerate(session_frames, 1):
             conf = frame_data['confidence']
             frame = frame_data['frame']
             frame_num = frame_data.get('frame_num', idx)
-
             success, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
             if success:
-                img = MIMEImage(buffer.tobytes(), name=f"{camera_name}_{detection_id}_frame{frame_num}_conf{conf:.0%}.jpg")
+                img = MIMEImage(
+                    buffer.tobytes(),
+                    name=f"{camera_name}_{detection_id}_frame{frame_num}_conf{conf:.0%}.jpg"
+                )
                 msg.attach(img)
 
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
@@ -780,151 +815,21 @@ def send_session_email(camera_name, detection_id):
             server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
 
-        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ Email sent for {camera_name} - Session {detection_id} ({len(session_frames)} frames)")
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ Email sent for {camera_name} "
+              f"- Session {detection_id} ({len(session_frames)} frames)")
 
     except Exception as e:
         print(f"[ERROR] Email alert failed for {camera_name}: {e}")
 
 
-def save_rejected_image(camera_name, frame, box, confidence, reason, aspect_ratio=None, area=None, min_value=None, top_y=None, min_conf=None):
-    """Save rejected detection image for debugging with clean filename format"""
-
-    if not SAVE_REJECTED_IMAGES:
-        return
-
-    try:
-        ensure_rejected_dir()
-
-        x1, y1, x2, y2 = box
-        width = x2 - x1
-        height = y2 - y1
-
-        # Get image dimensions
-        img_height, img_width = frame.shape[:2]
-
-        # Draw rejection info on image
-        debug_frame = frame.copy()
-        yellow = (0, 255, 255)
-        cv2.rectangle(debug_frame, (x1, y1), (x2, y2), yellow, 2)
-
-        timestamp = time.strftime('%Y-%m-%d_%H%M%S')
-
-        if reason == "area":
-            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Area too small ({area}px < {min_value}px) - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
-        elif reason == "area_too_large":
-            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Area too large ({area}px > {min_value}px) - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
-        elif reason == "aspect":
-            ar = aspect_ratio if aspect_ratio is not None else 0
-            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Bad aspect ratio ({ar:.2f}) - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
-        elif reason == "top_edge":
-            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Top-edge rejection - y1={top_y}, conf={confidence:.2f}<{min_conf} - box: {width}x{height}px REJECTED.jpg"
-        elif reason == "dark_pixels":
-            dark_percent = int(DARK_PIXEL_RATIO * 100)
-            filename = f"[{timestamp}] _[DEBUG] {camera_name}: Too many dark pixels ({min_value}% > {dark_percent}%) - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
-        else:
-            filename = f"[{timestamp}] _[DEBUG] {camera_name}: {reason} - box: {width}x{height}px conf={confidence:.2f} REJECTED.jpg"
-
-        filename = filename.replace(" ", "_").replace(":", "-")
-        filepath = os.path.join(REJECTED_IMAGES_DIR, filename)
-
-        # ==========================================
-        # CREATE TEXT LINES (ORDERED CORRECTLY)
-        # ==========================================
-        if reason == "area":
-            line1 = f"REJECTED: Area too small ({area}px < {min_value}px)"
-        elif reason == "area_too_large":
-            line1 = f"REJECTED: Area too large ({area}px > {min_value}px)"
-        elif reason == "aspect":
-            ar = aspect_ratio if aspect_ratio is not None else 0
-            line1 = f"REJECTED: Bad aspect ratio ({ar:.2f})"
-        elif reason == "top_edge":
-            line1 = f"REJECTED: Top-edge (y1={top_y})"
-        elif reason == "dark_pixels":
-            dark_percent = int(DARK_PIXEL_RATIO * 100)
-            line1 = f"REJECTED: Too many dark pixels (>{dark_percent}%)"
-        else:
-            line1 = f"REJECTED: {reason}"
-
-        line2 = f"Detection Conf: {confidence:.2f}"
-        line3 = f"YOLO Threshold: {YOLO_CONFIDENCE:.2f}"
-        line4 = f"Filter Threshold: {FILTER_CONFIDENCE:.2f}"
-
-        lines = [line1, line2, line3, line4]
-
-        # ==========================================
-        # FIND BEST TEXT POSITION
-        # ==========================================
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.5
-        thickness = 1
-
-        # Get max text width
-        max_width = 0
-        line_heights = []
-        for line in lines:
-            (w, h), _ = cv2.getTextSize(line, font, font_scale, thickness)
-            max_width = max(max_width, w)
-            line_heights.append(h)
-
-        line_spacing = 22
-        total_text_height = sum(line_heights) + (len(lines) - 1) * line_spacing
-
-        # Try positions in order: right, left, below
-        text_x = x2 + 10
-        text_y = y1 + line_heights[0]
-
-        # Check right side
-        if text_x + max_width > img_width:
-            # Try left side
-            text_x = x1 - max_width - 10
-            if text_x < 0:
-                # Put below
-                text_x = x1
-                text_y = y2 + line_heights[0] + 10
-
-        # Ensure text doesn't go off bottom
-        if text_y + total_text_height > img_height:
-            text_y = max(line_heights[0] + 5, img_height - total_text_height - 10)
-
-        # Ensure text doesn't go off top
-        if text_y - line_heights[0] < 0:
-            text_y = line_heights[0] + 5
-
-        # ==========================================
-        # DRAW TEXT WITH BACKGROUND
-        # ==========================================
-        for i, line in enumerate(lines):
-            (w, h), _ = cv2.getTextSize(line, font, font_scale, thickness)
-            y_pos = text_y + i * line_spacing
-
-            # Draw yellow background
-            cv2.rectangle(debug_frame,
-                         (text_x - 3, y_pos - h - 2),
-                         (text_x + w + 3, y_pos + 2),
-                         (0, 255, 255),
-                         -1)
-
-            # Draw black text
-            cv2.putText(debug_frame, line, (text_x, y_pos), font, font_scale, (0, 0, 0), thickness)
-
-        cv2.imwrite(filepath, debug_frame)
-        print(f"[DEBUG] Saved rejected image: {filepath}")
-
-    except Exception as e:
-        print(f"[ERROR] save_rejected_image failed for {camera_name}: {e}")
-        import traceback
-        traceback.print_exc()
-
-
-
 # ==========================================
-# EMAIL ALERT - SEND REJECTION EMAIL
+# EMAIL — SEND REJECTION EMAIL
 # ==========================================
-def send_rejection_email(camera_name, frame, box, confidence, reason, aspect_ratio=None, area=None, min_value=None):
+def send_rejection_email(camera_name, frame, box, confidence, reason,
+                         aspect_ratio=None, area=None, min_value=None):
     """Send email with rejected image for debugging."""
     if not ENABLE_EMAIL_ALERTS:
         return
-
     if not SMTP_USER or not SMTP_PASS or not ALERT_TO:
         return
 
@@ -932,69 +837,42 @@ def send_rejection_email(camera_name, frame, box, confidence, reason, aspect_rat
         x1, y1, x2, y2 = box
         width = x2 - x1
         height = y2 - y1
-        # Get image dimensions
         img_height, img_width = frame.shape[:2]
 
-
-        # Draw rejection info on image
         annotated_frame = frame.copy()
-        yellow = (0, 255, 255)  # yellow for rejected
+        yellow = (0, 255, 255)
         cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), yellow, 1)
 
         if reason == "area":
-            text = f"REJECTED: Area too small ({area}px < {min_value}px)"
             subject = f"⚠️ CCTV Rejection: Area too small on {camera_name}"
-        elif reason == "area_too_large":
-            text = f"REJECTED: Area too large ({area}px > {min_value}px)"
-            subject = f"⚠️ CCTV Rejection: Area too large on {camera_name}"
-        elif reason == "aspect":
-            text = f"REJECTED: Bad aspect ratio ({aspect_ratio:.2f})"
-            subject = f"⚠️ CCTV Rejection: Bad aspect ratio on {camera_name}"
-        elif reason == "top_edge":
-            text = f"REJECTED: Top-edge (y1={y1})"
-            subject = f"⚠️ CCTV Rejection: Top-edge on {camera_name}"
-        elif reason == "dark_pixels":
-            text = f"REJECTED: Too many dark pixels"
-            subject = f"⚠️ CCTV Rejection: Dark pixels on {camera_name}"
-        else:
-            text = f"REJECTED: {reason}"
-            subject = f"⚠️ CCTV Rejection: {reason} on {camera_name}"
-
-
-        # ==========================================
-        # CREATE TEXT LINES (ORDERED CORRECTLY)
-        # ==========================================
-        if reason == "area":
             line1 = f"REJECTED: Area too small ({area}px < {min_value}px)"
         elif reason == "area_too_large":
+            subject = f"⚠️ CCTV Rejection: Area too large on {camera_name}"
             line1 = f"REJECTED: Area too large ({area}px > {min_value}px)"
         elif reason == "aspect":
+            subject = f"⚠️ CCTV Rejection: Bad aspect ratio on {camera_name}"
             ar = aspect_ratio if aspect_ratio is not None else 0
             line1 = f"REJECTED: Bad aspect ratio ({ar:.2f})"
         elif reason == "top_edge":
+            subject = f"⚠️ CCTV Rejection: Top-edge on {camera_name}"
             line1 = f"REJECTED: Top-edge (y1={y1})"
         elif reason == "dark_pixels":
+            subject = f"⚠️ CCTV Rejection: Dark pixels on {camera_name}"
             dark_percent = int(DARK_PIXEL_RATIO * 100)
             line1 = f"REJECTED: Too many dark pixels (>{dark_percent}%)"
         else:
+            subject = f"⚠️ CCTV Rejection: {reason} on {camera_name}"
             line1 = f"REJECTED: {reason}"
 
-        area = img_width * img_width
         line2 = f"Detection Conf: {confidence:.2f}"
-        line3 = f"YOLO Conf/Filter Conf: {YOLO_CONFIDENCE:.2f}/{FILTER_CONFIDENCE:.2f} "
-        line4 = f"size: {width}x{height} area: {width * height}"
+        line3 = f"YOLO Conf/Filter Conf: {YOLO_CONFIDENCE:.2f}/{FILTER_CONFIDENCE:.2f}"
+        line4 = f"Size: {width}x{height}px  Area: {width * height}px"
 
-
-        lines = [line1, line2, line3, line4]
-
-        # ==========================================
-        # FIND BEST TEXT POSITION
-        # ==========================================
         font = cv2.FONT_HERSHEY_SIMPLEX
         font_scale = 0.5
         thickness = 1
+        lines = [line1, line2, line3, line4]
 
-        # Get max text width
         max_width = 0
         line_heights = []
         for line in lines:
@@ -1004,50 +882,28 @@ def send_rejection_email(camera_name, frame, box, confidence, reason, aspect_rat
 
         line_spacing = 22
         total_text_height = sum(line_heights) + (len(lines) - 1) * line_spacing
-
-        # Try positions in order: right, left, below
         text_x = x2 + 10
         text_y = y1 + line_heights[0]
 
-        # Check right side
         if text_x + max_width > img_width:
-            # Try left side
             text_x = x1 - max_width - 10
             if text_x < 0:
-                # Put below
                 text_x = x1
                 text_y = y2 + line_heights[0] + 10
 
-        # Ensure text doesn't go off bottom
         if text_y + total_text_height > img_height:
             text_y = max(line_heights[0] + 5, img_height - total_text_height - 10)
-
-        # Ensure text doesn't go off top
         if text_y - line_heights[0] < 0:
             text_y = y2 + line_heights[0] + 5
 
-        # ==========================================
-        # DRAW TEXT WITH BACKGROUND
-        # ==========================================
-        for i, line in enumerate(lines):
-            (w, h), _ = cv2.getTextSize(line, font, font_scale, thickness)
-            y_pos = text_y + i * line_spacing
-
-            # Draw yellow background
-            cv2.rectangle(annotated_frame,
-                         (text_x - 3, y_pos - h - 2),
-                         (text_x + w + 3, y_pos + 2),
-                         (0, 255, 255),
-                         -1)
-
-        draw_text_with_background(annotated_frame, line1, (text_x, text_y), 0.5, (0, 255, 255), (0, 0, 0))
-        draw_text_with_background(annotated_frame, line2, (text_x, text_y+24), 0.5, (0, 255, 255), (0, 0, 0))
-        draw_text_with_background(annotated_frame, line3, (text_x, text_y+(24*2)), 0.5, (0, 255, 255), (0, 0, 0))
-        draw_text_with_background(annotated_frame, line4, (text_x, text_y+(24*3)), 0.5, (0, 255, 255), (0, 0, 0))
+        draw_text_with_background(annotated_frame, line1, (text_x, text_y),            0.5, yellow, (0, 0, 0))
+        draw_text_with_background(annotated_frame, line2, (text_x, text_y + 24),       0.5, yellow, (0, 0, 0))
+        draw_text_with_background(annotated_frame, line3, (text_x, text_y + 48),       0.5, yellow, (0, 0, 0))
+        draw_text_with_background(annotated_frame, line4, (text_x, text_y + 72),       0.5, yellow, (0, 0, 0))
 
         success, buffer = cv2.imencode('.jpg', annotated_frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
         if not success:
-            print(f"[ERROR] Rejection email failed for {camera_name}: can not get buffer!")
+            print(f"[ERROR] Rejection email failed for {camera_name}: cannot encode frame")
             return
 
         msg = MIMEMultipart()
@@ -1057,13 +913,12 @@ def send_rejection_email(camera_name, frame, box, confidence, reason, aspect_rat
 
         body = (
             f"<b>Camera:</b> {camera_name}<br>"
-            f"<b>Reason:</b> {text}<br>"
+            f"<b>Reason:</b> {line1}<br>"
             f"<b>Confidence:</b> {confidence:.0%}<br>"
             f"<b>Box:</b> {width}x{height}px<br>"
             f"<b>Time:</b> {time.strftime('%Y-%m-%d %H:%M:%S')}"
         )
         msg.attach(MIMEText(body, 'html'))
-
         img = MIMEImage(buffer.tobytes(), name=f"rejected_{camera_name}_{reason}.jpg")
         msg.attach(img)
 
@@ -1077,6 +932,33 @@ def send_rejection_email(camera_name, frame, box, confidence, reason, aspect_rat
     except Exception as e:
         print(f"[ERROR] Rejection email failed for {camera_name}: {e}")
 
+
+# ==========================================
+# PENDING EMAIL WATCHDOG
+# If the recorder reset signal never arrives (crash, missed POST, etc.),
+# this fires the email after PENDING_EMAIL_TIMEOUT seconds so alerts
+# are never silently lost.  Runs in the main process.
+# ==========================================
+PENDING_EMAIL_TIMEOUT = 360   # 5-minute segment + 60s grace
+
+def pending_email_watchdog():
+    """Expire and send pending emails that never received a recorder reset."""
+    while True:
+        time.sleep(30)
+        now = time.time()
+        expired = []
+        with pending_emails_lock:
+            for name, p in list(pending_emails.items()):
+                if now - p.created_at > PENDING_EMAIL_TIMEOUT:
+                    expired.append(pending_emails.pop(name))
+
+        for pending in expired:
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⏰ Pending email timeout: "
+                  f"{pending.camera_name} [SID:{pending.detection_id}] — "
+                  f"sending without recorder reset confirmation")
+            email_executor.submit(send_session_email_from_pending, pending)
+
+
 # ==========================================
 # CONFIGURATION RELOAD THREAD (for day/night switching)
 # ==========================================
@@ -1085,20 +967,15 @@ def config_reload_thread():
     global CAMERA_MIN_AREA, CAMERA_MAX_AREA, CAMERA_ASPECT_RATIOS
 
     while True:
-        time.sleep(3600)  # Check every hour
-
-        # Reload configurations
+        time.sleep(3600)
         new_min_area = load_camera_config("CAMERA_MIN_AREA")
-
-        # Only update if changed (avoid unnecessary updates)
         if CAMERA_MIN_AREA != new_min_area:
             CAMERA_MIN_AREA = new_min_area
             CAMERA_MAX_AREA = load_camera_config("CAMERA_MAX_AREA")
             CAMERA_ASPECT_RATIOS = load_camera_config("CAMERA_ASPECT_RATIO")
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Camera configs updated for {'DAY' if is_daytime() else 'NIGHT'}")
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Camera configs updated "
+                  f"for {'DAY' if is_daytime() else 'NIGHT'}")
 
-# Start config reload thread
-threading.Thread(target=config_reload_thread, daemon=True).start()
 
 # ==========================================
 # YOLO WORKER PROCESS
@@ -1109,257 +986,217 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                         yolo_iou, debug_log_interval):
 
     import threading
-    # Separate timers for debug logs (prevents cross-filter suppression)
-    _last_area_log_time = {}          # Area too small
-    _last_maxarea_log_time = {}       # Area too large (headlights, vehicles)
-    _last_aspect_log_time = {}        # Bad aspect ratio
-    _last_topedge_log_time = {}       # Top-edge rejection
-    _last_topedge_accept_log_time = {} # Top-edge acceptance
-    _last_dark_log_time = {}          # Dark pixel rejection
 
-    # Separate timers for image saving (rate-limited)
-    _last_area_save_time = {}          # Area too small save timer
-    _last_maxarea_save_time = {}       # Area too large save timer
-    _last_aspect_save_time = {}        # Bad aspect ratio save timer
-    _last_topedge_save_time = {}       # Top-edge rejection save timer
-    _last_dark_save_time = {}          # Dark pixel rejection save timer
+    _last_area_log_time = {}
+    _last_maxarea_log_time = {}
+    _last_aspect_log_time = {}
+    _last_topedge_log_time = {}
+    _last_topedge_accept_log_time = {}
+    _last_dark_log_time = {}
 
-    # Timers for rejection email (rate-limited to 5 minutes per camera)
-    _last_rejection_email_time = {}
+    _last_area_save_time = {}
+    _last_maxarea_save_time = {}
+    _last_aspect_save_time = {}
+    _last_topedge_save_time = {}
+    _last_dark_save_time = {}
 
     _log_lock = threading.Lock()
 
-    def is_valid_person_detection_worker(camera_name, box, confidence, image_height, frame_id=None, original_frame=None):
+    _last_rejection_queue_time = {}
+    _rejection_pending = []
+    _rejection_lock = threading.Lock()
+
+    def queue_rejection_email(camera_name, frame, box, confidence, reason, **kwargs):
+        now = time.time()
+        last = _last_rejection_queue_time.get(camera_name, 0)
+        if now - last >= 300:
+            _last_rejection_queue_time[camera_name] = now
+            with _rejection_lock:
+                _rejection_pending.append(
+                    (camera_name, frame.copy() if frame is not None else None,
+                     box, confidence, reason, kwargs)
+                )
+
+    def is_valid_person_detection_worker(camera_name, box, confidence,
+                                         image_height, frame_id=None, original_frame=None):
         x1, y1, x2, y2 = box
         width = x2 - x1
         height = y2 - y1
         area = width * height
         min_area = camera_min_area_dict.get(camera_name, min_person_area)
         max_area = camera_max_area_dict.get(camera_name) if camera_max_area_dict else None
-        min_ratio, max_ratio = camera_aspect_ratios_dict.get(camera_name, (min_aspect_ratio, max_aspect_ratio))
+        min_ratio, max_ratio = camera_aspect_ratios_dict.get(
+            camera_name, (min_aspect_ratio, max_aspect_ratio)
+        )
 
-        # Initialize aspect_ratio to a default value
-        aspect_ratio = 0.0
+        # Aspect-ratio (shape) filter — ALWAYS applied, even for high-confidence
+        # detections. A standing person is taller than wide; a box outside the
+        # configured ratio range is not a person no matter how confident YOLO is.
+        # This runs BEFORE the high-confidence bypass so confident-but-wrong wide
+        # boxes (e.g. vehicles) are rejected instead of emailed.
+        if enable_aspect_filter and width > 0:
+            aspect_ratio_val = height / width
+            if aspect_ratio_val < min_ratio or aspect_ratio_val > max_ratio:
+                with _log_lock:
+                    now = time.time()
+                    if now - _last_aspect_log_time.get(camera_name, 0) >= debug_log_interval:
+                        _last_aspect_log_time[camera_name] = now
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: "
+                              f"Bad aspect ratio ({aspect_ratio_val:.2f}) - "
+                              f"box: {width}x{height}px conf={confidence:.2f} REJECTED!")
 
-        # ==========================================
-        # HIGH CONFIDENCE BYPASS
-        # ==========================================
+                if original_frame is not None and SAVE_REJECTED_IMAGES:
+                    now = time.time()
+                    if now - _last_aspect_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
+                        _last_aspect_save_time[camera_name] = now
+                        save_rejected_image(camera_name, original_frame, box, confidence,
+                                            "aspect", aspect_ratio=aspect_ratio_val)
+
+                queue_rejection_email(camera_name, original_frame, box, confidence,
+                                      "aspect", aspect_ratio=aspect_ratio_val)
+                return False
+
+        # High confidence bypass (shape already validated above)
         if confidence >= FILTER_CONFIDENCE:
             return True
 
-        # ==========================================
-        # DARK PIXEL FILTER
-        # ==========================================
+        # Dark pixel filter
         if enable_dark_filter and confidence < FILTER_CONFIDENCE:
             if is_dark_detection(original_frame, box, DARKNESS_THRESHOLD, DARK_PIXEL_RATIO):
                 with _log_lock:
                     now = time.time()
-                    last_time = _last_dark_log_time.get(camera_name, 0)
-                    if now - last_time >= debug_log_interval and ENABLE_DEBUG_PRINTS:
+                    if now - _last_dark_log_time.get(camera_name, 0) >= debug_log_interval and ENABLE_DEBUG_PRINTS:
                         _last_dark_log_time[camera_name] = now
                         dark_percent = int(DARK_PIXEL_RATIO * 100)
-                        msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: Too many dark pixels (> {dark_percent}%) - box: {width}x{height}px conf={confidence:.2f} REJECTED!"
-                        print(msg)
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: "
+                              f"Too many dark pixels (> {dark_percent}%) - "
+                              f"box: {width}x{height}px conf={confidence:.2f} REJECTED!")
 
-                # Rate-limited image saving
                 if original_frame is not None and SAVE_REJECTED_IMAGES:
                     now = time.time()
-                    last_save = _last_dark_save_time.get(camera_name, 0)
-                    if now - last_save >= SAVE_IMAGE_INTERVAL:
+                    if now - _last_dark_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
                         _last_dark_save_time[camera_name] = now
-                        dark_percent = int(DARK_PIXEL_RATIO * 100)
-                        save_rejected_image(camera_name, original_frame, box, confidence, "dark_pixels",
-                                          min_value=dark_percent)
+                        save_rejected_image(camera_name, original_frame, box, confidence,
+                                            "dark_pixels", min_value=int(DARK_PIXEL_RATIO * 100))
 
-                # Rate-limited rejection email (1 per 5 minutes per camera)
-                if original_frame is not None:
-                    now = time.time()
-                    last_email = _last_rejection_email_time.get(camera_name, 0)
-                    if now - last_email >= 300:
-                        _last_rejection_email_time[camera_name] = now
-                        email_executor.submit(send_rejection_email, camera_name, original_frame, box, confidence, "dark_pixels")
+                queue_rejection_email(camera_name, original_frame, box, confidence, "dark_pixels")
                 return False
 
-        # ==========================================
-        # MIN AREA FILTER (too small) - WITH DEBUG
-        # ==========================================
+        # Min area filter
         if enable_area_filter and area < min_area:
             with _log_lock:
                 now = time.time()
-                last_time = _last_area_log_time.get(camera_name, 0)
-                if now - last_time >= debug_log_interval and ENABLE_DEBUG_PRINTS:
+                if now - _last_area_log_time.get(camera_name, 0) >= debug_log_interval and ENABLE_DEBUG_PRINTS:
                     _last_area_log_time[camera_name] = now
-                    msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: Area too small ({area}px < {min_area}px) - box: {width}x{height}px REJECTED!"
-                    print(msg)
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: "
+                          f"Area too small ({area}px < {min_area}px) - "
+                          f"box: {width}x{height}px REJECTED!")
 
-            # ==========================================
-            # DEBUG: Check save conditions
-            # ==========================================
-            print(f"[DEBUG] SAVE_REJECTED_IMAGES={SAVE_REJECTED_IMAGES}")
-            print(f"[DEBUG] original_frame is None? {original_frame is None}")
-
-            # ==========================================
-            # SAVE REJECTED IMAGE
-            # ==========================================
             if original_frame is not None and SAVE_REJECTED_IMAGES:
                 now = time.time()
-                last_save = _last_area_save_time.get(camera_name, 0)
-                print(f"[DEBUG] last_save={last_save}, now={now}, diff={now - last_save}, SAVE_IMAGE_INTERVAL={SAVE_IMAGE_INTERVAL}")
-                if now - last_save >= SAVE_IMAGE_INTERVAL:
+                if now - _last_area_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
                     _last_area_save_time[camera_name] = now
-                    print(f"[DEBUG] ABOUT TO CALL save_rejected_image for {camera_name}")
-                    save_rejected_image(camera_name, original_frame, box, confidence, "area",
-                                      area=area, min_value=min_area)
-                else:
-                    print(f"[DEBUG] SKIPPING save - rate limited (need {SAVE_IMAGE_INTERVAL}s, only {now - last_save:.1f}s since last)")
-            else:
-                print(f"[DEBUG] SKIPPING save - condition failed (SAVE_REJECTED_IMAGES={SAVE_REJECTED_IMAGES}, original_frame is None? {original_frame is None})")
+                    save_rejected_image(camera_name, original_frame, box, confidence,
+                                        "area", area=area, min_value=min_area)
 
-            # ==========================================
-            # SEND REJECTION EMAIL
-            # ==========================================
-            if original_frame is not None:
-                now = time.time()
-                last_email = _last_rejection_email_time.get(camera_name, 0)
-                if now - last_email >= 300:
-                    _last_rejection_email_time[camera_name] = now
-                    email_executor.submit(send_rejection_email, camera_name, original_frame, box, confidence, "area",
-                                         area=area, min_value=min_area)
+            queue_rejection_email(camera_name, original_frame, box, confidence,
+                                  "area", area=area, min_value=min_area)
             return False
 
-        # ==========================================
-        # MAX AREA FILTER (too large)
-        # ==========================================
+        # Max area filter
         if max_area is not None and area > max_area:
             with _log_lock:
                 now = time.time()
-                last_time = _last_maxarea_log_time.get(camera_name, 0)
-                if now - last_time >= debug_log_interval:
+                if now - _last_maxarea_log_time.get(camera_name, 0) >= debug_log_interval:
                     _last_maxarea_log_time[camera_name] = now
-                    msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: Area too large ({area}px > {max_area}px) - box: {width}x{height}px conf={confidence:.2f} REJECTED!"
-                    print(msg)
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: "
+                          f"Area too large ({area}px > {max_area}px) - "
+                          f"box: {width}x{height}px conf={confidence:.2f} REJECTED!")
 
-            # Rate-limited image saving
             if original_frame is not None and SAVE_REJECTED_IMAGES:
                 now = time.time()
-                last_save = _last_maxarea_save_time.get(camera_name, 0)
-                if now - last_save >= SAVE_IMAGE_INTERVAL:
+                if now - _last_maxarea_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
                     _last_maxarea_save_time[camera_name] = now
-                    save_rejected_image(camera_name, original_frame, box, confidence, "area_too_large",
-                                      area=area, min_value=max_area)
+                    save_rejected_image(camera_name, original_frame, box, confidence,
+                                        "area_too_large", area=area, min_value=max_area)
 
-            # Rate-limited rejection email
-            if original_frame is not None:
-                now = time.time()
-                last_email = _last_rejection_email_time.get(camera_name, 0)
-                if now - last_email >= 300:
-                    _last_rejection_email_time[camera_name] = now
-                    email_executor.submit(send_rejection_email, camera_name, original_frame, box, confidence, "area_too_large",
-                                         area=area, min_value=max_area)
+            queue_rejection_email(camera_name, original_frame, box, confidence,
+                                  "area_too_large", area=area, min_value=max_area)
             return False
 
-        # ==========================================
-        # ASPECT RATIO FILTER
-        # ==========================================
-        if enable_aspect_filter and width > 0:
-            aspect_ratio = height / width
-            if aspect_ratio < min_ratio or aspect_ratio > max_ratio:
-                with _log_lock:
-                    now = time.time()
-                    last_time = _last_aspect_log_time.get(camera_name, 0)
-                    if now - last_time >= debug_log_interval:
-                        _last_aspect_log_time[camera_name] = now
-                        msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: Bad aspect ratio ({aspect_ratio:.2f}) - box: {width}x{height}px conf={confidence:.2f} REJECTED!"
-                        print(msg)
-
-                if original_frame is not None and SAVE_REJECTED_IMAGES:
-                    now = time.time()
-                    last_save = _last_aspect_save_time.get(camera_name, 0)
-                    if now - last_save >= SAVE_IMAGE_INTERVAL:
-                        _last_aspect_save_time[camera_name] = now
-                        save_rejected_image(camera_name, original_frame, box, confidence, "aspect",
-                                          aspect_ratio=aspect_ratio)
-
-                # Rate-limited rejection email
-                if original_frame is not None:
-                    now = time.time()
-                    last_email = _last_rejection_email_time.get(camera_name, 0)
-                    if now - last_email >= 300:
-                        _last_rejection_email_time[camera_name] = now
-                        email_executor.submit(send_rejection_email, camera_name, original_frame, box, confidence, "aspect",
-                                             aspect_ratio=aspect_ratio)
-                return False
-
-        # ==========================================
-        # TOP-EDGE (GROUND) FILTER
-        # ==========================================
+        # Top-edge filter
         if ENABLE_TOP_EDGE_FILTER and image_height is not None:
-            LABEL_MARGIN = 12  # Space reserved for label
+            LABEL_MARGIN = 12
             top_y = y1
             if top_y <= TOP_EDGE_MARGIN + LABEL_MARGIN:
                 if confidence < TOP_EDGE_HIGH_CONF:
                     with _log_lock:
                         now = time.time()
-                        last_time = _last_topedge_log_time.get(camera_name, 0)
-                        if now - last_time >= debug_log_interval:
+                        if now - _last_topedge_log_time.get(camera_name, 0) >= debug_log_interval:
                             _last_topedge_log_time[camera_name] = now
-                            msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: Top-edge rejection - y1={top_y}, conf={confidence:.2f}<{TOP_EDGE_HIGH_CONF} REJECTED!"
-                            print(msg)
+                            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: "
+                                  f"Top-edge rejection - y1={top_y}, "
+                                  f"conf={confidence:.2f}<{TOP_EDGE_HIGH_CONF} REJECTED!")
 
-                    # Rate-limited image saving
                     if original_frame is not None and SAVE_REJECTED_IMAGES:
                         now = time.time()
-                        last_save = _last_topedge_save_time.get(camera_name, 0)
-                        if now - last_save >= SAVE_IMAGE_INTERVAL:
+                        if now - _last_topedge_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
                             _last_topedge_save_time[camera_name] = now
-                            save_rejected_image(camera_name, original_frame, box, confidence, "top_edge",
-                                              top_y=top_y, min_conf=TOP_EDGE_HIGH_CONF)
+                            save_rejected_image(camera_name, original_frame, box, confidence,
+                                                "top_edge", top_y=top_y, min_conf=TOP_EDGE_HIGH_CONF)
 
-                    # Rate-limited rejection email
-                    if original_frame is not None:
-                        now = time.time()
-                        last_email = _last_rejection_email_time.get(camera_name, 0)
-                        if now - last_email >= 300:
-                            _last_rejection_email_time[camera_name] = now
-                            email_executor.submit(send_rejection_email, camera_name, original_frame, box, confidence, "top_edge")
+                    queue_rejection_email(camera_name, original_frame, box, confidence, "top_edge")
                     return False
                 else:
                     with _log_lock:
                         now = time.time()
-                        last_time = _last_topedge_accept_log_time.get(camera_name, 0)
-                        if now - last_time >= debug_log_interval:
+                        if now - _last_topedge_accept_log_time.get(camera_name, 0) >= debug_log_interval:
                             _last_topedge_accept_log_time[camera_name] = now
-                            msg = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ [DEBUG] {camera_name}: Top-edge HIGH CONF ACCEPT - y1={top_y}, conf={confidence:.2f}>={TOP_EDGE_HIGH_CONF}"
-                            print(msg)
+                            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ [DEBUG] {camera_name}: "
+                                  f"Top-edge HIGH CONF ACCEPT - y1={top_y}, "
+                                  f"conf={confidence:.2f}>={TOP_EDGE_HIGH_CONF}")
 
         return True
 
+    # --- YOLO model load ---
     try:
         print("Loading yolov8n.onnx with pure ONNX Runtime...")
         so = ort.SessionOptions()
         so.intra_op_num_threads = 1
         so.inter_op_num_threads = 1
-
         session = ort.InferenceSession(
             "yolov8n.onnx",
             sess_options=so,
             providers=["CPUExecutionProvider"]
         )
-
         input_name = session.get_inputs()[0].name
         print("Pure ONNX Runtime initialized")
         print("Ultra-light + smart NMS (minimal CPU increase)")
-
     except Exception as e:
         print(f"❌ ONNX load failed: {e}")
         return
 
-    scale_x = scale_y = 1.0
+    # Day/night config reload (worker-local): this worker is a separate process and
+    # will NOT see config dicts updated in the main process, so we re-check the
+    # day/night transition here and reload directly from the config file.
+    current_daytime = is_daytime()
+    last_config_check = time.time()
+    CONFIG_CHECK_INTERVAL = 60  # seconds
 
     while True:
         try:
+            now_check = time.time()
+            if now_check - last_config_check >= CONFIG_CHECK_INTERVAL:
+                last_config_check = now_check
+                if is_daytime() != current_daytime:
+                    current_daytime = is_daytime()
+                    camera_min_area_dict = load_camera_config("CAMERA_MIN_AREA")
+                    camera_max_area_dict = load_camera_config("CAMERA_MAX_AREA")
+                    camera_aspect_ratios_dict = load_camera_config("CAMERA_ASPECT_RATIO")
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 [WORKER] Camera configs "
+                          f"reloaded for {'DAY' if current_daytime else 'NIGHT'}")
+
             name, frame, ts, capture_time = input_q.get(timeout=0.5)
-            frame_id = f"{name}_{capture_time}"
 
             h, w = frame.shape[:2]
             scale_x = w / YOLO_INPUT_SIZE
@@ -1367,7 +1204,9 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
 
             img = cv2.resize(frame, (YOLO_INPUT_SIZE, YOLO_INPUT_SIZE))
             img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            img = (img.astype(np.float32) / 255.0).transpose(2, 0, 1).reshape(1, 3, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE)
+            img = (img.astype(np.float32) / 255.0).transpose(2, 0, 1).reshape(
+                1, 3, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE
+            )
 
             outputs = session.run(None, {input_name: img})
             predictions = outputs[0][0]
@@ -1381,56 +1220,58 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                     continue
 
                 xc, yc, pw, ph = pred[:4]
-                x1 = int((xc - pw/2) * scale_x)
-                y1 = int((yc - ph/2) * scale_y)
-                x2 = int((xc + pw/2) * scale_x)
-                y2 = int((yc + ph/2) * scale_y)
-
+                x1 = int((xc - pw / 2) * scale_x)
+                y1 = int((yc - ph / 2) * scale_y)
+                x2 = int((xc + pw / 2) * scale_x)
+                y2 = int((yc + ph / 2) * scale_y)
                 box = [x1, y1, x2, y2]
 
-                if is_valid_person_detection_worker(name, box, confidence, h, frame_id, frame):
+                if is_valid_person_detection_worker(name, box, confidence, h, None, frame):
                     detections.append({"box": box, "conf": float(confidence)})
 
+            # NMS
             if len(detections) > 0:
                 detections.sort(key=lambda x: x['conf'], reverse=True)
                 filtered = []
-
                 for d1 in detections:
                     keep = True
                     x1, y1, x2, y2 = d1['box']
                     area1 = (x2 - x1) * (y2 - y1)
-
                     for d2 in filtered:
                         xx1 = max(x1, d2['box'][0])
                         yy1 = max(y1, d2['box'][1])
                         xx2 = min(x2, d2['box'][2])
                         yy2 = min(y2, d2['box'][3])
-
                         if xx2 > xx1 and yy2 > yy1:
                             overlap = (xx2 - xx1) * (yy2 - yy1)
-                            area2 = (d2['box'][2] - d2['box'][0]) * (d2['box'][3] - d2['box'][1])
+                            area2 = ((d2['box'][2] - d2['box'][0]) *
+                                     (d2['box'][3] - d2['box'][1]))
                             union = area1 + area2 - overlap
                             iou = overlap / union if union > 0 else 0
-
                             if iou > yolo_iou:
                                 keep = False
                                 break
-
                     if keep:
                         filtered.append(d1)
-
                 detections = filtered
 
+            # Drain pending rejection emails and include in result
+            with _rejection_lock:
+                rejections = _rejection_pending.copy()
+                _rejection_pending.clear()
+
             try:
-                output_q.put_nowait((name, frame, detections, ts, capture_time))
+                output_q.put_nowait((name, frame, detections, ts, capture_time, rejections))
             except Full:
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⚠️ Result queue full, dropping {name} detection")
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⚠️ Result queue full, "
+                      f"dropping {name} detection")
 
         except Empty:
             continue
         except Exception as e:
             print(f"YOLO error: {e}")
             time.sleep(1)
+
 
 def start_yolo_worker(task_q, result_q):
     global yolo_process
@@ -1452,7 +1293,7 @@ def check_yolo_health(task_q, result_q):
     while True:
         time.sleep(YOLO_RESTART_DELAY)
         if yolo_process and not yolo_process.is_alive():
-            print(f"⚠️ YOLO worker died! Restarting...")
+            print("⚠️ YOLO worker died! Restarting...")
             yolo_process.join(timeout=1)
             yolo_process = multiprocessing.Process(
                 target=yolo_worker_process,
@@ -1463,7 +1304,8 @@ def check_yolo_health(task_q, result_q):
                 daemon=True
             )
             yolo_process.start()
-            print(f"✅ YOLO worker restarted")
+            print("✅ YOLO worker restarted")
+
 
 # ==========================================
 # CAMERA STREAM
@@ -1476,21 +1318,27 @@ class CameraStream:
         self.frame = None
         self.frame_time = 0
         self.running = True
+        self.cap = None
         threading.Thread(target=self.update, daemon=True).start()
 
     def update(self):
-        cap = None
         consecutive_failures = 0
         max_failures = 5
+
         while self.running:
             try:
-                if cap is None:
-                    cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
-                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-                    if not cap.isOpened():
+                if self.cap is None or not self.cap.isOpened():
+                    if self.cap:
+                        self.cap.release()
+                    self.cap = cv2.VideoCapture(self.url, cv2.CAP_FFMPEG)
+                    self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                    self.cap.set(cv2.CAP_PROP_FPS, 15)
+                    if not self.cap.isOpened():
                         raise Exception("Failed to open camera")
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ {self.name}: Camera connected")
                     consecutive_failures = 0
-                ret, frame = cap.read()
+
+                ret, frame = self.cap.read()
                 if ret and frame is not None:
                     with self.lock:
                         self.frame = frame
@@ -1499,29 +1347,46 @@ class CameraStream:
                 else:
                     consecutive_failures += 1
                     if consecutive_failures >= max_failures:
-                        cap.release()
-                        cap = None
-                        consecutive_failures = 0
-                        time.sleep(2)
-                        continue
-                time.sleep(CAM_THREAD_SLEEP)
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⚠️ {self.name}: "
+                              f"No frames after {max_failures} attempts, reconnecting...")
+                        self.cap.release()
+                        self.cap = None
+                    time.sleep(0.05)
+
             except Exception as e:
-                if cap:
-                    cap.release()
-                    cap = None
+                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ {self.name}: Error: {e}")
+                if self.cap:
+                    self.cap.release()
+                    self.cap = None
                 time.sleep(2)
 
-    def get_frame(self):
+    def get_frame(self, max_age=1.5):
+        """Return the most recent frame only if it is fresher than max_age seconds."""
         with self.lock:
             if self.frame is not None:
-                return self.frame.copy(), self.frame_time
+                if time.time() - self.frame_time < max_age:
+                    return self.frame.copy(), self.frame_time
         return None, 0
 
     def stop(self):
         self.running = False
+        if self.cap:
+            self.cap.release()
+
 
 # ==========================================
-# SESSION WATCHDOG
+# SESSION WATCHDOG - FIXED v3.25.3
+# 
+# Separate timeouts for different purposes:
+#   ACTIVE_SESSION_IDLE_TIMEOUT (60s): How long an incomplete session can go 
+#     without a new detection before it's considered abandoned. When this
+#     expires, the session is cleaned up AND any captured frames are saved
+#     as a pending email so they aren't lost.
+#   
+#   SESSION_TIMEOUT (300s): Legacy timeout for WAITING_RESET state (should no
+#     longer occur on normal path, but kept for safety).
+#   
+#   PENDING_EMAIL_TIMEOUT (360s): Handled by separate pending_email_watchdog.
 # ==========================================
 def session_watchdog():
     while True:
@@ -1529,26 +1394,55 @@ def session_watchdog():
         now = time.time()
         for name, state in camera_states.items():
             with state.lock:
+                # Handle COMPLETED state cleanup
                 if state.state == SessionState.COMPLETED:
                     if now - state.last_reset_time > 5:
                         state.state = SessionState.IDLE
                     continue
-                if state.state == SessionState.WAITING_RESET and state.last_waiting_start > 0:
+                
+                # Handle WAITING_RESET (legacy, should not happen normally)
+                if (state.state == SessionState.WAITING_RESET and
+                        state.last_waiting_start > 0):
                     if now - state.last_waiting_start > WATCHDOG_TIMEOUT:
-                        print(f"⚠️ Watchdog: {name} stuck. Force resetting.")
+                        print(f"⚠️ Watchdog: {name} stuck in WAITING_RESET. Force resetting.")
+                        # Save any captured frames as pending email before cleanup
+                        if state.count > 0 and state.detection_id:
+                            with state.session_frames_lock:
+                                frames_copy = state.session_frames.copy()
+                                state.session_frames = []
+                            with pending_emails_lock:
+                                pending_emails[name] = PendingEmail(
+                                    name, state.detection_id, frames_copy, state.count
+                                )
+                            print(f"📧 {name}: Saved {state.count} frames as pending email before force reset")
                         state.state = SessionState.IDLE
                         state.count = 0
                         state.detection_id = None
                         state.active_session_id = None
                         state.last_processed_count = 0
+                
+                # Handle ACTIVE session idle timeout (NO new detections for a while)
                 elif state.state == SessionState.ACTIVE and state.count > 0:
-                    if now - state.last_activity > SESSION_TIMEOUT:
-                        print(f"⏰ Session timeout: {name}")
+                    if now - state.last_activity > ACTIVE_SESSION_IDLE_TIMEOUT:
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⏰ Session idle timeout: {name} - no detections for {ACTIVE_SESSION_IDLE_TIMEOUT}s")
+                        
+                        # Save partial session as pending email so frames aren't lost
+                        if state.count > 0 and state.detection_id:
+                            with state.session_frames_lock:
+                                frames_copy = state.session_frames.copy()
+                                state.session_frames = []
+                            with pending_emails_lock:
+                                pending_emails[name] = PendingEmail(
+                                    name, state.detection_id, frames_copy, state.count
+                                )
+                            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 📧 {name}: Saved {state.count} frames as pending email before cleanup")
+                        
                         state.state = SessionState.IDLE
                         state.count = 0
-                        state.active_session_id = None
                         state.detection_id = None
+                        state.active_session_id = None
                         state.last_processed_count = 0
+
 
 # ==========================================
 # MAIN
@@ -1575,17 +1469,20 @@ if __name__ == "__main__":
     print(f"YOLO_INPUT_SIZE: {YOLO_INPUT_SIZE}")
     print(f"YOLO_IOU: {YOLO_IOU}")
     print(f"WEBHOOK_PORT: {WEBHOOK_PORT}")
-    print(f"SESSION_TIMEOUT: {SESSION_TIMEOUT}s (idle sessions)")
+    print(f"SESSION_TIMEOUT: {SESSION_TIMEOUT}s (legacy, for WAITING_RESET)")
+    print(f"ACTIVE_SESSION_IDLE_TIMEOUT: {ACTIVE_SESSION_IDLE_TIMEOUT}s (idle detection timeout)")
     print(f"WATCHDOG: {WATCHDOG_CHECK}s check interval, {WATCHDOG_TIMEOUT}s timeout for stuck sessions")
     print(f"COOLDOWN: {COOLDOWN}s (unified cooldown)")
     print(f"RESET_DEDUP_WINDOW: {RESET_DEDUP_WINDOW}s (ignore duplicate resets)")
+    print(f"PENDING_EMAIL_TIMEOUT: {PENDING_EMAIL_TIMEOUT}s (safety net if recorder reset missed)")
     print(f"MIN_PERSON_AREA: {MIN_PERSON_AREA}")
     print(f"MIN_ASPECT_RATIO: {MIN_ASPECT_RATIO}")
     print(f"DRAW_BOUNDING_BOXES: {DRAW_BOUNDING_BOXES}")
     print(f"TOP_EDGE_FILTER: {ENABLE_TOP_EDGE_FILTER} (margin={TOP_EDGE_MARGIN}px, high_conf={TOP_EDGE_HIGH_CONF})")
     print(f"AREA_FILTER: {ENABLE_AREA_FILTER}")
     print(f"ASPECT_FILTER: {ENABLE_ASPECT_FILTER}")
-    print(f"DARK_FILTER: {ENABLE_DARK_FILTER} (threshold={DARKNESS_THRESHOLD}, ratio={DARK_PIXEL_RATIO:.0%}, min_conf={FILTER_CONFIDENCE})")
+    print(f"DARK_FILTER: {ENABLE_DARK_FILTER} (threshold={DARKNESS_THRESHOLD}, "
+          f"ratio={DARK_PIXEL_RATIO:.0%}, min_conf={FILTER_CONFIDENCE})")
     print(f"MAX_AREA_FILTER: Enabled (per-camera thresholds)")
     print(f"DEBUG_LOG_INTERVAL: {DEBUG_LOG_INTERVAL}s")
     print(f"ENABLE_DEBUG_PRINTS: {ENABLE_DEBUG_PRINTS}")
@@ -1599,32 +1496,30 @@ if __name__ == "__main__":
     print(f"  ENABLE_EMAIL_ALERTS: {ENABLE_EMAIL_ALERTS}")
     print("=" * 60)
 
-#    print("CONFIG LOADING DEBUG:")
-#    print(f"Config sections: {config.sections()}")
-#
-#    print("\nCAMERA_MIN_AREA from config:")
-#    for camera, value in config["CAMERA_MIN_AREA"].items():
-#        print(f"  {camera} = {value}")
-#
-#    print("\nCAMERA_MAX_AREA from config:")
-#    for camera, value in config["CAMERA_MAX_AREA"].items():
-#        print(f"  {camera} = {value}")
-#
-#    print("\nCAMERA_ASPECT_RATIO from config:")
-#    for camera, value in config["CAMERA_ASPECT_RATIO"].items():
-#        print(f"  {camera} = {value}")
-#
-#    print("=" * 60)
-
     threading.Thread(target=session_watchdog, daemon=True).start()
+    threading.Thread(target=pending_email_watchdog, daemon=True).start()
+    threading.Thread(target=config_reload_thread, daemon=True).start()
+
+    # ==========================================
+    # RESULT HANDLER
+    # ==========================================
+    _main_rejection_email_time = {}
 
     def handle_results():
         while True:
             try:
-                name, frame, detections, ts, capture_time = result_q.get(timeout=0.01)
+                name, frame, detections, ts, capture_time, rejections = result_q.get(timeout=0.01)
 
-                current_count = None
-                detection_id = None
+                # --- Process rejection emails from YOLO worker ---
+                for (cam, rej_frame, box, conf, reason, kwargs) in rejections:
+                    now = time.time()
+                    last = _main_rejection_email_time.get(cam, 0)
+                    if now - last >= 300:
+                        _main_rejection_email_time[cam] = now
+                        if rej_frame is not None:
+                            email_executor.submit(
+                                send_rejection_email, cam, rej_frame, box, conf, reason, **kwargs
+                            )
 
                 now = time.time()
                 state = camera_states[name]
@@ -1636,10 +1531,14 @@ if __name__ == "__main__":
                     continue
 
                 with state.lock:
-                    cooldown_remaining = COOLDOWN - (now - state.last_reset_time) if state.last_reset_time > 0 else 0
+                    cooldown_remaining = (COOLDOWN - (now - state.last_reset_time)
+                                         if state.last_reset_time > 0 else 0)
 
                 if cooldown_remaining > 0:
                     continue
+
+                current_count = None
+                detection_id = None
 
                 with state.lock:
                     if state.state == SessionState.IDLE:
@@ -1656,14 +1555,11 @@ if __name__ == "__main__":
 
                     next_count = state.count + 1
                     if next_count <= state.last_processed_count:
-                        if next_count == state.last_processed_count:
-                            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {name}: Skipping duplicate frame count {next_count} (already processed) [SID:{state.detection_id}]")
                         continue
 
                     if state.count == 0:
                         state.detection_id = str(uuid.uuid4())[:8]
                         state.active_session_id = state.detection_id
-                        # Clear previous session frames
                         with state.session_frames_lock:
                             state.session_frames = []
                         print(f"[{ts}] 🆔 {name}: New detection session {state.detection_id}")
@@ -1680,9 +1576,11 @@ if __name__ == "__main__":
                     width = int(box[2] - box[0])
                     height = int(box[3] - box[1])
 
-                    print(f"[{ts}] ⚡ >>> {name}: {state.count}/{MAX_IMAGES} [SID:{detection_id}] conf={conf:.2f} box={width}x{height}px area={width*height}px {y1}px")
+                    print(f"[{ts}] ⚡ >>> {name}: {state.count}/{MAX_IMAGES} "
+                          f"[SID:{detection_id}] conf={conf:.2f} "
+                          f"box={width}x{height}px area={width*height}px {y1}px")
 
-                    # Store frame for email (keep only top MAX_IMAGES by confidence)
+                    # Store frame for pending email
                     with state.session_frames_lock:
                         state.session_frames.append({
                             'confidence': conf,
@@ -1690,7 +1588,6 @@ if __name__ == "__main__":
                             'timestamp': ts,
                             'frame_num': state.count
                         })
-                        # Keep only top MAX_IMAGES (sorted by confidence)
                         state.session_frames.sort(key=lambda x: x['confidence'], reverse=True)
                         state.session_frames = state.session_frames[:MAX_IMAGES]
 
@@ -1698,8 +1595,8 @@ if __name__ == "__main__":
                     continue
 
                 if frame is not None:
-                    draw_and_upload(name, NODES[name]["rpi_url"], frame, detections, ts,
-                                  current_count, MAX_IMAGES, detection_id)
+                    draw_and_upload(name, NODES[name]["rpi_url"], frame, detections,
+                                    ts, current_count, MAX_IMAGES, detection_id)
 
                 with state.lock:
                     state.last_upload = now
@@ -1711,26 +1608,36 @@ if __name__ == "__main__":
 
     threading.Thread(target=handle_results, daemon=True).start()
 
+    # ==========================================
+    # MAIN CAPTURE LOOP
+    # ==========================================
     try:
         while True:
             now = time.time()
             for name in NODES:
                 state = camera_states[name]
+
                 with state.lock:
                     if state.state == SessionState.WAITING_RESET:
                         continue
-                    skip = now - state.last_queued_time < ANALYSIS_INTERVAL
-                if skip:
+                    time_since_last = now - state.last_queued_time
+
+                if time_since_last < ANALYSIS_INTERVAL:
                     continue
+
                 frame, frame_time = streams[name].get_frame()
-                if frame is not None:
-                    try:
-                        task_q.put_nowait((name, frame, time.strftime('%Y-%m-%d %H:%M:%S'), frame_time))
-                        with state.lock:
-                            state.last_queued_time = now
-                    except Full:
-                        metrics.inc_dropped_frames()
+                if frame is None:
+                    continue
+
+                try:
+                    task_q.put_nowait((name, frame, time.strftime('%Y-%m-%d %H:%M:%S'), frame_time))
+                    with state.lock:
+                        state.last_queued_time = now
+                except Full:
+                    metrics.inc_dropped_frames()
+
             time.sleep(0.05)
+
     except KeyboardInterrupt:
         print("\nShutting down...")
         upload_executor.shutdown(wait=True)
