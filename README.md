@@ -1,3 +1,11 @@
+
+
+# Project Status
+
+**Current Version:** `3.25.4, 1.8.7`
+
+> This project is actively under development. Features, APIs, configuration parameters, and documentation may change between releases.
+
 # Raspberry Pi Multi-Camera CCTV Recorder & Person Detector
 
 An intelligent, decentralized edge-AI CCTV system that runs entirely on local
