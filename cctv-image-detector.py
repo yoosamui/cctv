@@ -419,14 +419,15 @@ def is_dark_detection(frame, box, darkness_threshold=50, dark_pixel_ratio=0.3):
 class SessionState(Enum):
     IDLE = 0
     ACTIVE = 1
-    WAITING_RESET = 2   # kept for watchdog compatibility but no longer used on hot path
+    WAITING_RESET = 2   # camera parks here after a full session until the recorder's /session-reset arrives
     COMPLETED = 3
 
 # ==========================================
 # PENDING EMAIL
 # Holds captured frames after a session completes, waiting for the recorder's
-# /session-reset signal before sending the email.  The camera itself returns
-# to IDLE immediately so new detections are not blocked.
+# /session-reset signal before sending the email.  The camera parks in
+# WAITING_RESET (one session per recording segment) and resumes detection
+# only when that signal arrives.
 # ==========================================
 class PendingEmail:
     def __init__(self, camera_name, detection_id, frames, frame_count):
@@ -559,8 +560,9 @@ def verify_auth():
 
 # ==========================================
 # SESSION RESET WEBHOOK
-# The camera is already back to IDLE when this arrives.
-# This handler's only job is to fire the pending email.
+# The camera is parked in WAITING_RESET when this arrives.  This handler
+# moves it to COMPLETED (resuming detection), saves any mid-capture frames,
+# and fires the pending email for the segment.
 # ==========================================
 @app.route('/session-reset', methods=['POST'])
 def session_reset():
@@ -680,7 +682,7 @@ def upload_task(camera_name, url, image_buffer, ts, current_count, max_images, d
             response = requests.post(url, files=files, data=data, headers=headers, timeout=5)
             response.raise_for_status()
 
-            # On last frame, return camera to IDLE immediately and register a PendingEmail.
+            # On last frame, park the camera in WAITING_RESET and register a PendingEmail.
             if current_count == max_images:
                 with state.lock:
                     if (state.state == SessionState.ACTIVE and
@@ -1378,14 +1380,16 @@ class CameraStream:
 # SESSION WATCHDOG - FIXED v3.25.3
 # 
 # Separate timeouts for different purposes:
-#   ACTIVE_SESSION_IDLE_TIMEOUT (60s): How long an incomplete session can go 
+#   ACTIVE_SESSION_IDLE_TIMEOUT (60s): How long an incomplete session can go
 #     without a new detection before it's considered abandoned. When this
 #     expires, the session is cleaned up AND any captured frames are saved
 #     as a pending email so they aren't lost.
-#   
-#   SESSION_TIMEOUT (300s): Legacy timeout for WAITING_RESET state (should no
-#     longer occur on normal path, but kept for safety).
-#   
+#
+#   WATCHDOG_TIMEOUT: Safety net for a camera stuck in WAITING_RESET. A full
+#     session normally leaves WAITING_RESET when the recorder's /session-reset
+#     arrives; if that signal is missed, this force-resets the camera and saves
+#     any captured frames as a pending email.
+#
 #   PENDING_EMAIL_TIMEOUT (360s): Handled by separate pending_email_watchdog.
 # ==========================================
 def session_watchdog():
@@ -1400,7 +1404,7 @@ def session_watchdog():
                         state.state = SessionState.IDLE
                     continue
                 
-                # Handle WAITING_RESET (legacy, should not happen normally)
+                # Handle WAITING_RESET (safety net for a missed recorder reset)
                 if (state.state == SessionState.WAITING_RESET and
                         state.last_waiting_start > 0):
                     if now - state.last_waiting_start > WATCHDOG_TIMEOUT:
@@ -1469,7 +1473,7 @@ if __name__ == "__main__":
     print(f"YOLO_INPUT_SIZE: {YOLO_INPUT_SIZE}")
     print(f"YOLO_IOU: {YOLO_IOU}")
     print(f"WEBHOOK_PORT: {WEBHOOK_PORT}")
-    print(f"SESSION_TIMEOUT: {SESSION_TIMEOUT}s (legacy, for WAITING_RESET)")
+    print(f"SESSION_TIMEOUT: {SESSION_TIMEOUT}s (legacy, loaded but unused)")
     print(f"ACTIVE_SESSION_IDLE_TIMEOUT: {ACTIVE_SESSION_IDLE_TIMEOUT}s (idle detection timeout)")
     print(f"WATCHDOG: {WATCHDOG_CHECK}s check interval, {WATCHDOG_TIMEOUT}s timeout for stuck sessions")
     print(f"COOLDOWN: {COOLDOWN}s (unified cooldown)")

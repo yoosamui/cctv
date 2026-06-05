@@ -1,9 +1,19 @@
-# Full CCTV Recorder Code v1.8.6 - Fixed (Returns 200 instead of 429)
+# Full CCTV Recorder Code v1.8.7 - Fixed (Returns 200 instead of 429)
 
 """
 CCTV Recorder with Person Detection
 ====================================
-Version: 1.8.6 - Improved Cleanup & Performance & security
+Version: 1.8.7 - Improved Cleanup & Performance & security
+
+Changes in 1.8.7:
+  1. ffmpeg RTSP timeout flag is auto-detected (-stimeout on ffmpeg <5.0,
+     -timeout on >=5.0) so a Pi OS upgrade can't silently break recording.
+  2. TEMP_DIR (staging) is now swept for orphaned files left by failed moves
+     (e.g. share unmounted) so /tmp can no longer fill up segment-by-segment.
+  3. Closed a race on session_image_count: the cap check and the count bump
+     now happen under one lock (slot reserved before save, rolled back on
+     failure) so concurrent uploads can't exceed MAX_IMAGES_PER_SESSION.
+  4. DETECTOR_WEBHOOK_URL is now configurable via [NETWORK] detector_webhook_url.
 """
 
 import subprocess
@@ -22,7 +32,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from dotenv import load_dotenv
 
-VERSION = "1.8.6"
+VERSION = "1.8.7"
 
 # ================= CONFIGURATION LOADING =================
 config = configparser.ConfigParser()
@@ -132,8 +142,12 @@ else:
 
     print("Authentication to detector will fail!")
 
-# Detector webhook URL
-DETECTOR_WEBHOOK_URL = "http://192.168.1.19:5001/session-reset"
+# Detector webhook URL (fallback preserves the original hardcoded value)
+DETECTOR_WEBHOOK_URL = config.get(
+    'NETWORK',
+    'detector_webhook_url',
+    fallback="http://192.168.1.19:5001/session-reset"
+)
 
 # ================= GLOBAL STATE =================
 CAM_NAME = None
@@ -378,6 +392,13 @@ def upload_image():
                 "session_count": session_image_count
             }, 200
 
+        # Reserve this slot now, under the same lock as the cap check above, so
+        # two concurrent uploads can't both pass the check and exceed the cap.
+        # Rolled back below if the save fails.
+        session_image_count += 1
+        current_count = session_image_count
+        last_detection_time = time.time()
+
         current_prefix = current_video_prefix
 
     target_dir = get_camera_dir()
@@ -398,11 +419,6 @@ def upload_image():
     try:
 
         file.save(save_path)
-
-        with prefix_lock:
-            session_image_count += 1
-            current_count = session_image_count
-            last_detection_time = time.time()
 
         print(
             f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
@@ -430,6 +446,10 @@ def upload_image():
         }, 200
 
     except Exception as e:
+
+        # Release the slot we reserved before the save attempt.
+        with prefix_lock:
+            session_image_count -= 1
 
         print(
             f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
@@ -531,6 +551,31 @@ def move_to_share_background(local_path, filename):
 
 
 # ================= FFMPEG PROCESS MANAGEMENT =================
+def detect_ffmpeg_timeout_flag():
+    """RTSP socket-timeout flag for the installed ffmpeg.
+
+    ffmpeg <5.0 (e.g. Pi OS Bullseye, 4.3) uses -stimeout; >=5.0 renamed it to
+    -timeout and removed -stimeout. Probe once at startup so an OS/ffmpeg
+    upgrade can't silently break recording.
+    """
+    try:
+        out = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-h", "demuxer=rtsp"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        ).stdout
+
+        return "-stimeout" if "stimeout" in out else "-timeout"
+
+    except Exception:
+        # Safe default for the current Pi OS (ffmpeg 4.3)
+        return "-stimeout"
+
+
+FFMPEG_TIMEOUT_FLAG = detect_ffmpeg_timeout_flag()
+
+
 def kill_ffmpeg():
     """Safely terminate active ffmpeg process."""
 
@@ -668,18 +713,57 @@ def cleanup_old_recordings():
         )
 
 
+def cleanup_temp_dir():
+    """Remove orphaned staging files left by failed moves (share unmounted/full).
+
+    Anything older than two segment durations cannot be the file ffmpeg is
+    currently writing, so /tmp can't fill up segment-by-segment when the share
+    is unavailable.
+    """
+
+    max_age = SEGMENT_DURATION * 2 + 60
+
+    try:
+        now = time.time()
+
+        for f in os.listdir(TEMP_DIR):
+            p = os.path.join(TEMP_DIR, f)
+
+            try:
+                if os.path.isfile(p) and now - os.path.getmtime(p) > max_age:
+                    size = os.path.getsize(p)
+                    os.remove(p)
+
+                    print(
+                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+                        f"🗑️ Removed stale staging file: {f} "
+                        f"({size / (1024**2):.1f} MB)"
+                    )
+
+            except OSError:
+                pass
+
+    except Exception as e:
+        print(
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"❌ Temp cleanup failed: {e}"
+        )
+
+
 def cleanup_worker():
     """Background thread that runs cleanup on a schedule."""
-    
+
     # Run cleanup immediately on startup
     cleanup_old_recordings()
-    
+    cleanup_temp_dir()
+
     # Then run at configured interval
     while not shutdown_flag:
         time.sleep(CLEANUP_INTERVAL_HOURS * 3600)
-        
+
         if not shutdown_flag:
             cleanup_old_recordings()
+            cleanup_temp_dir()
 
 
 # ================= RECORDING LOOP =================
@@ -733,7 +817,7 @@ def recording_loop():
             "error",
             "-rtsp_transport",
             "tcp",
-            "-stimeout",
+            FFMPEG_TIMEOUT_FLAG,
             "5000000",
             "-i",
             URL,
