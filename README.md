@@ -162,9 +162,23 @@ python3 cctv-image-detector.py
 
 ---
 
-## Configuration
+## Installation and Configuration 
 
 ### Recorder — `config.ini` (next to the script)
+the recorder (cctv-video-recorder.py) in the heard of the cctv system.**
+**step-1**
+```text
+ ssh in to your Rasberry pi terminal.
+ make sure you have git install. if not
+ $ sudo apt update
+ $ sudo apt install git
+ 
+cd /home/pi
+
+git clone 
+
+```
+
 
 ```ini
 [STORAGE]
