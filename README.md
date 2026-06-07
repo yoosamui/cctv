@@ -112,12 +112,6 @@ stuck in `WAITING_RESET` after `WATCHDOG_TIMEOUT`.
 | GET    | `/status`        | none               | Current segment, dirs, session state                 |
 | POST   | `/reset`         | none               | Manually clear the session counter                   |
 
-**Run it**
-
-```bash
-python3 cctv-video-recorder.py --name Gate --url "rtsp://user:pass@192.168.1.99:554/Streaming/channels/102"
-```
-
 ### `cctv-image-detector.py` (detector — one process, all cameras)
 
 - Maintains a background `CameraStream` thread per camera (in the `NODES` dict),
@@ -154,11 +148,6 @@ python3 cctv-video-recorder.py --name Gate --url "rtsp://user:pass@192.168.1.99:
 | POST   | `/reset`         | required           | Deprecated alias for `/session-reset`            |
 | GET    | `/health`        | none               | Per-camera state/count + pending-email count     |
 
-**Run it**
-
-```bash
-python3 cctv-image-detector.py
-```
 
 ---
 
@@ -181,23 +170,23 @@ the recorder (cctv-video-recorder.py) in the heard of the cctv system.
  $ keep only files we need.
  $ rm -drf cctv-image* image_detector_config/ ansible-cctv/
 
- # credentials
+ credentials
  $ sudo mkdir -p /etc/cctv
  $ cd /etc/cctv
  $ cp /home/pi/cctv/credentials/recorder/credentials.env .
 
- # add you credentials and save.
+ add you credentials and save.
  $ nano credentials.env
 
- # create the camera rtsp
+ create the camera rtsp
  $ nano Gate.conf
  $ add this: URL=rtsp://user:pass@<IP>:554/Streaming/channels/101
  $ save the file 
  
- # configure the recorder
+ configure the recorder
  $ cd /home/pi/cctv
  $ nano config.ini. 
- # made you changes and save
+ made you changes and save
 
 ```
 
@@ -218,7 +207,7 @@ max_images_per_session = 3                      ; cap on detection frames
 flask_port = 5000
 detector_webhook_url = http://192.168.1.19:5001/session-reset   ; optional
 ```
-**NOTE:** detector_webhook_url = <IP OF THE IMAGE_DETECTOR ON THE RPI5> 
+**NOTE:** detector_webhook_url = IP_OF_THE_IMAGE_DETECTOR_RPI5 
 
 
 After this the recorder is ready to run.
