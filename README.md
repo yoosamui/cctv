@@ -218,6 +218,7 @@ $ cd /home/pi/cctv
 $ sudo cp cctv-video-recorder@.service /etc/systemd/system
 
 $ sudo systemctl restart cctv-video-recorder@Gate.service
+$ sudo systemctl enable --now cctv-video-recorder@Gate.service
 $ sudo systemctl status cctv-video-recorder@Gate.service
 
 # journal log 
@@ -238,9 +239,10 @@ Time      Event       Details
 finish. 
 ```
 
+### Detector
 
 
-### Detector — `/etc/cctv/config.ini`
+**`/etc/cctv/config.ini`**
 
 Key sections (see the shipped file for the full annotated set):
 
@@ -256,7 +258,7 @@ Key sections (see the shipped file for the full annotated set):
   `[TOP_EDGE_CONFIG]` — per-camera thresholds, with `[NIGHT_*]` overrides applied
   outside the `07:00–19:00` daytime window.
 
-### Credentials — `/etc/cctv/credentials.env`
+**Credentials — `/etc/cctv/credentials.env`**
 
 Loaded with `python-dotenv` on both nodes:
 
