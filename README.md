@@ -1,6 +1,6 @@
 # Raspberry Pi Multi-Camera CCTV Recorder & Person Detector
 
-# Project Status
+** Project Status**
 
 **Current Version:** `3.25.5, 1.8.7`
 
