@@ -551,7 +551,7 @@ Contributions and suggestions are welcome.
 
 ## License
 
-Distributed under the MIT License. See `LICENSE` for more information.
+Distributed under the MIT License. See [LICENSE](LICENSE) for more information.
 **current version:** 3.25.5, 1.8.7` 
 
-See [LICENSE](LICENSE).
+
