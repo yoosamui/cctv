@@ -318,10 +318,13 @@ camera name to its RTSP source (`cam_rtsp`) and the recorder upload endpoint
 (`rpi_url`). Camera names here must match the `--name` passed to the recorder and
 the keys used in the per-camera config sections.
 
-YOU NEED TO SET THE NODES RTSP URIs
+YOU NEED TO SET THE NODES rpi_url for all recorder camerass
+YOU ALSO NEED TO SET THE NODES cam_rtsp 
 in the cctv-image-detector.py file.
 
+
 ~~~
+**rows 530 -542**
 # ==========================================
 # CAMERA NODES
 # ==========================================
