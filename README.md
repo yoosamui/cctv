@@ -2,7 +2,7 @@
 
 # Project Status
 
-**Current Version:** `3.25.4, 1.8.7`
+**Current Version:** `3.25.5, 1.8.7`
 
 > This project is actively under development. Features, APIs, configuration parameters, and documentation may change between releases.
 
@@ -20,7 +20,7 @@ segment** — with aggressive false-positive filtering in between.
 | Item              | Value                            |
 | ----------------- | -------------------------------- |
 | Recorder version  | `1.8.7`                          |
-| Detector version  | `3.25.4`                         |
+| Detector version  | `3.25.5`                         |
 | Detector model    | YOLOv8n (ONNX Runtime, CPU)      |
 | Detector hardware | Raspberry Pi 5 (1 node, all cams)|
 | Recorder hardware | Raspberry Pi 4B (1 node per cam) |
@@ -274,6 +274,11 @@ journalctl -u cctv-video-recorder@Gate.service -f
 - Close a `session_image_count` race (slot reserved under one lock, rolled back on
   failure) so concurrent uploads can't exceed `MAX_IMAGES_PER_SESSION`.
 - `DETECTOR_WEBHOOK_URL` configurable via `[NETWORK] detector_webhook_url`.
+
+**Detector 3.25.5**
+- Top-edge filter is now per-camera via `[TOP_EDGE_CONFIG]` (`margin,high_conf`,
+  with day/night overrides); cameras not listed fall back to the global
+  `[FILTERS]` values.
 
 **Detector 3.25.4**
 - One session per recording segment: a stationary person no longer spawns a new

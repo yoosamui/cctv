@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.25.4  cloude+deepseek
+# CCTV IMAGE DETECTOR - VERSION 3.25.5  cloude+deepseek
 # ==============================================================================
+#
+# IMPROVEMENTS in v3.25.5:
+#   1. Top-edge filter is now per-camera: [TOP_EDGE_CONFIG] (margin,high_conf) is
+#      loaded via load_camera_config() with day/night overrides and passed to the
+#      YOLO worker, instead of the single global pair. Cameras not listed fall
+#      back to the global [FILTERS] TOP_EDGE_MARGIN / TOP_EDGE_HIGH_CONF.
 #
 # IMPROVEMENTS in v3.25.4:
 #   1. Fixed continuous-presence session spam: a person standing still no longer
@@ -67,7 +73,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 
-VERSION = "3.25.4"
+VERSION = "3.25.5"
 
 # ==========================================
 # SILENCE LOGS
