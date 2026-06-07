@@ -1,12 +1,10 @@
-
+# Raspberry Pi Multi-Camera CCTV Recorder & Person Detector
 
 # Project Status
 
 **Current Version:** `3.25.5, 1.8.7`
 
 > This project is actively under development. Features, APIs, configuration parameters, and documentation may change between releases.
-
-# Raspberry Pi Multi-Camera CCTV Recorder & Person Detector
 
 An intelligent, decentralized edge-AI CCTV system that runs entirely on local
 hardware — no cloud, no subscriptions, no third-party video storage.
@@ -322,9 +320,8 @@ the keys used in the per-camera config sections.
   YOU ALSO NEED TO SET THE NODES cam_rtsp 
   in the cctv-image-detector.py file.
 
-
-~~~
 **rows 530 -542**
+~~~
 # ==========================================
 # CAMERA NODES
 # ==========================================
