@@ -1,10 +1,9 @@
 # Raspberry Pi Multi-Camera CCTV Recorder & Person Detector
 
-** Project Status**
-
-**Current Version:** `3.25.5, 1.8.7`
+**Project Status:** Current Version:`detector 3.25.5,  recorder 1.8.7`
 
 > This project is actively under development. Features, APIs, configuration parameters, and documentation may change between releases.
+
 
 An intelligent, decentralized edge-AI CCTV system that runs entirely on local
 hardware — no cloud, no subscriptions, no third-party video storage.
@@ -382,11 +381,10 @@ take your time and made the chnages you need and save the changes.
 ```
 
 
-The detetor is now reay and we can start it.
-for thsi we also use a systemd service unit.
-```
+The detetor is now ready  we can start it now.
+For this we also use a systemd service unit.
 
-** Step-2**
+**Step-2**
 
 ```text
 $ cd /home/pi/cctv
@@ -398,6 +396,27 @@ $ sudo systemctl renable cctv-image-detector.service
 
 journal log 
 $ journalctl -u cctv-image-detector.service  -f -o cat
++----------+----------+----------------+--------------------------+
+| Time     | Camera   | Event          | Details                  |
++----------+----------+----------------+--------------------------+
+| 17:26:54 | Gate     | Recorder Reset | No pending email         |
+| 17:27:52 | Entrance | New Session    | bc834c7c                 |
+| 17:27:53 | Center   | New Session    | 19b5ef05                 |
+| 17:27:56 | Center   | REJECTED       | Bad aspect ratio (0.38)  |
+| 17:28:00 | Center   | Email Sent     | Rejection notice         |
+| 17:28:10 | Garage   | Recorder Reset | No pending email         |
+| 17:28:12 | Gate     | New Session    | 095599eb                 |
+| 17:29:02 | Center   | Idle Timeout   | Cleanup (1 frame saved)  |
+| 17:29:38 | Center   | New Session    | 42117b4c                 |
+| 17:30:10 | Entrance | Recorder Reset | Email sent (bc834c7c)    |
+| 17:30:10 | Center   | Recorder Reset | Email sent (42117b4c)    |
+| 17:30:18 | Behind   | Recorder Reset | No pending email         |
+| 17:30:25 | Left     | Recorder Reset | No pending email         |
+| 17:31:55 | Gate     | Recorder Reset | Email sent (095599eb)    |
+| 17:32:10 | Gate     | New Session    | 92fedae7                 |
+| 17:33:11 | Garage   | Recorder Reset | No pending email         |
+| 17:34:58 | Entrance | New Session    | a37ea336                 |
++----------+----------+----------------+--------------------------+
 
 finish.
 ```
