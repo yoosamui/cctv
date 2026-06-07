@@ -2,7 +2,7 @@
 
 # Project Status
 
-**Current Version:** `3.25.4, 1.8.7`
+**Current Version:** `3.25.5, 1.8.7`
 
 > This project is actively under development. Features, APIs, configuration parameters, and documentation may change between releases.
 
@@ -20,7 +20,7 @@ segment** — with aggressive false-positive filtering in between.
 | Item              | Value                            |
 | ----------------- | -------------------------------- |
 | Recorder version  | `1.8.7`                          |
-| Detector version  | `3.25.4`                         |
+| Detector version  | `3.25.5`                         |
 | Detector model    | YOLOv8n (ONNX Runtime, CPU)      |
 | Detector hardware | Raspberry Pi 5 (1 node, all cams)|
 | Recorder hardware | Raspberry Pi 4B (1 node per cam) |
@@ -165,8 +165,10 @@ python3 cctv-image-detector.py
 ## Installation and Configuration 
 
 ### Recorder — `config.ini` (next to the script)
-the recorder (cctv-video-recorder.py) in the heard of the cctv system.**
+the recorder (cctv-video-recorder.py) in the heard of the cctv system.
+
 **step-1**
+
 ```text
  ssh in to your Rasberry pi terminal.
  make sure you have git,ffmpeg are install. if not
@@ -194,16 +196,12 @@ the recorder (cctv-video-recorder.py) in the heard of the cctv system.**
  
  # configure the recorder
  $ cd /home/pi/cctv
- # nano config.ini. 
+ $ nano config.ini. 
  # made you changes and save
-
- 
-
-
-
 
 ```
 
+**config.ini**
 
 ```ini
 [STORAGE]
@@ -220,6 +218,38 @@ max_images_per_session = 3                      ; cap on detection frames
 flask_port = 5000
 detector_webhook_url = http://192.168.1.19:5001/session-reset   ; optional
 ```
+**NOTE:** detector_webhook_url = <IP OF THE IMAGE_DETECTOR ON THE RPI5> 
+
+
+After this the recorder is ready to run.
+We will use a systemd service template for this.
+
+```text
+$ cd /home/pi/cctv
+$ sudo cp cctv-video-recorder@.service /etc/systemd/system
+
+$ sudo systemctl restart cctv-video-recorder@Gate.service
+$ sudo systemctl status cctv-video-recorder@Gate.service
+
+# journal log 
+$ journalctl -u cctv-video-recorder@Garage.service  -f -o cat
+
+Time      Event       Details
+16:02:59  Reset       Garage session confirmed
+16:07:59  Recording   2026-06-07_16-07-59_Garage.mp4
+16:08:00  Moved       2026-06-07_16-02-59_Garage.mp4
+16:08:00  Reset       Garage session confirmed
+16:13:00  Recording   2026-06-07_16-13-00_Garage.mp4
+16:13:00  Moved       2026-06-07_16-07-59_Garage.mp4
+16:13:01  Reset       Garage session confirmed
+16:18:01  Recording   2026-06-07_16-18-01_Garage.mp4
+16:18:01  Moved       2026-06-07_16-13-00_Garage.mp4
+16:18:01  Reset       Garage session confirmed
+
+finish. 
+```
+
+
 
 ### Detector — `/etc/cctv/config.ini`
 
