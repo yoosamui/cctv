@@ -144,7 +144,7 @@ python3 cctv-video-recorder.py --name Gate --url "rtsp://user:pass@192.168.1.99:
 | 3     | Dark pixel        | Rejects boxes that are mostly dark (shadows/noise).                   |
 | 4     | Min area          | Per-camera `CAMERA_MIN_AREA`.                                         |
 | 5     | Max area          | Per-camera `CAMERA_MAX_AREA` — rejects headlights, close-up objects.  |
-| 6     | Top edge          | Rejects boxes hugging the top edge unless very confident. Uses the **global** `TOP_EDGE_MARGIN` / `TOP_EDGE_HIGH_CONF` from `[FILTERS]` for all cameras (not per-camera). |
+| 6     | Top edge          | Rejects boxes hugging the top edge unless very confident. Uses per-camera `(margin, high_conf)` from `[TOP_EDGE_CONFIG]`, falling back to the global `TOP_EDGE_MARGIN` / `TOP_EDGE_HIGH_CONF` in `[FILTERS]` for any camera not listed. |
 
 **HTTP API** (default port `5001`)
 
@@ -189,18 +189,18 @@ Key sections (see the shipped file for the full annotated set):
 - `[GENERAL]` — `ANALYSIS_INTERVAL`, `MAX_IMAGES`, `COOLDOWN`, `WEBHOOK_PORT`.
 - `[YOLO]` — `CONFIDENCE`, `INPUT_SIZE`, `IOU`, `RESTART_DELAY`.
 - `[FILTERS]` — enable flags + thresholds; `FILTER_CONFIDENCE` is the
-  high-confidence bypass cutoff. The top-edge filter reads `TOP_EDGE_MARGIN` and
-  `TOP_EDGE_HIGH_CONF` from here and applies them globally to every camera.
+  high-confidence bypass cutoff. `TOP_EDGE_MARGIN` / `TOP_EDGE_HIGH_CONF` here are
+  the **fallback** top-edge values, used for any camera not listed in
+  `[TOP_EDGE_CONFIG]`.
 - `[SESSION]` — `WATCHDOG_TIMEOUT`, `WATCHDOG_CHECK`, `RESET_DEDUP_WINDOW`
   (`SESSION_TIMEOUT` is loaded but no longer used on the hot path).
 - `[UPLOAD]` — worker/queue sizing and retry policy.
 - `[DEBUG]` — rejected-image saving for filter tuning.
-- `[CAMERA_MIN_AREA]`, `[CAMERA_MAX_AREA]`, `[CAMERA_ASPECT_RATIO]` — the only
-  per-camera sections, each with `[NIGHT_*]` overrides applied outside the
-  `07:00–19:00` daytime window.
-- `[TOP_EDGE_CONFIG]` — **present in the file but not read by the detector.** The
-  top-edge filter uses the global `[FILTERS]` values instead, so editing this
-  section has no effect.
+- `[CAMERA_MIN_AREA]`, `[CAMERA_MAX_AREA]`, `[CAMERA_ASPECT_RATIO]`,
+  `[TOP_EDGE_CONFIG]` — per-camera sections, each with `[NIGHT_*]` overrides
+  applied outside the `07:00–19:00` daytime window. `[TOP_EDGE_CONFIG]` values are
+  `margin,high_conf`; cameras omitted here fall back to the global `[FILTERS]`
+  top-edge values.
 
 ### Credentials — `/etc/cctv/credentials.env`
 
