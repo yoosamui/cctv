@@ -169,13 +169,38 @@ the recorder (cctv-video-recorder.py) in the heard of the cctv system.**
 **step-1**
 ```text
  ssh in to your Rasberry pi terminal.
- make sure you have git install. if not
+ make sure you have git,ffmpeg are install. if not
  $ sudo apt update
- $ sudo apt install git
+ $ sudo apt install git, ffmpeg
  
-cd /home/pi
+ $ cd /home/pi
+ $ git clone https://github.com/yoosamui/cctv.git
+ $ cd cctv
+ $ keep only files we need.
+ $ rm -drf cctv-image* image_detector_config/ ansible-cctv/
 
-git clone 
+ # credentials
+ $ sudo mkdir -p /etc/cctv
+ $ cd /etc/cctv
+ $ cp /home/pi/cctv/credentials/recorder/credentials.env .
+
+ # add you credentials and save.
+ $ nano credentials.env
+
+ # create the camera rtsp
+ $ nano Gate.conf
+ $ add this: URL=rtsp://user:pass@<IP>:554/Streaming/channels/101
+ $ save the file 
+ 
+ # configure the recorder
+ $ cd /home/pi/cctv
+ # nano config.ini. 
+ # made you changes and save
+
+ 
+
+
+
 
 ```
 
