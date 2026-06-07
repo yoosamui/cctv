@@ -401,30 +401,61 @@ $ sudo systemctl enable cctv-image-detector.service
 
 journal log 
 $ journalctl -u cctv-image-detector.service  -f -o cat
-+----------+----------+----------------+--------------------------+
-| Time     | Camera   | Event          | Details                  |
-+----------+----------+----------------+--------------------------+
-| 17:26:54 | Gate     | Recorder Reset | No pending email         |
-| 17:27:52 | Entrance | New Session    | bc834c7c                 |
-| 17:27:53 | Center   | New Session    | 19b5ef05                 |
-| 17:27:56 | Center   | REJECTED       | Bad aspect ratio (0.38)  |
-| 17:28:00 | Center   | Email Sent     | Rejection notice         |
-| 17:28:10 | Garage   | Recorder Reset | No pending email         |
-| 17:28:12 | Gate     | New Session    | 095599eb                 |
-| 17:29:02 | Center   | Idle Timeout   | Cleanup (1 frame saved)  |
-| 17:29:38 | Center   | New Session    | 42117b4c                 |
-| 17:30:10 | Entrance | Recorder Reset | Email sent (bc834c7c)    |
-| 17:30:10 | Center   | Recorder Reset | Email sent (42117b4c)    |
-| 17:30:18 | Behind   | Recorder Reset | No pending email         |
-| 17:30:25 | Left     | Recorder Reset | No pending email         |
-| 17:31:55 | Gate     | Recorder Reset | Email sent (095599eb)    |
-| 17:32:10 | Gate     | New Session    | 92fedae7                 |
-| 17:33:11 | Garage   | Recorder Reset | No pending email         |
-| 17:34:58 | Entrance | New Session    | a37ea336                 |
-+----------+----------+----------------+--------------------------+
+
+[2026-06-01 22:55:32] 🆔 Garage: New detection session ae3a2d65
+[2026-06-01 22:55:32] ⚡ Garage: 1/3 [SID:ae3a2d65] conf=0.70 box=44x118px area=5192px
+[2026-06-01 22:55:35] ⚡ Garage: 2/3 [SID:ae3a2d65] conf=0.70 box=76x189px area=14364px
+[2026-06-01 22:55:38] ⚡ Garage: 3/3 [SID:ae3a2d65] conf=0.59 box=104x258px area=26832px
+[2026-06-01 22:55:38] 🛑 Garage: Last frame sent (3/3) [SID:ae3a2d65]
+❌ [DEBUG] Garage: Area too large (40261px > 30000px) - box: 163x247px conf=0.66 REJECTED!
 
 finish.
 ```
+## Hardware Performance Numbers
+## System Performance Snapshot
+
+| Metric | Value | Notes |
+|--------|-------|------|
+| CPU Temperature | `60.4°C` | Safe operating temperature for Raspberry Pi 5 |
+| Total CPU Usage | `68.6%` of one core | Combined usage from detector processes |
+| Total Memory Usage | `4%` | Very low RAM utilization |
+| System Uptime | `5 days, 22 hours` | Stable long-term operation |
+| Load Average (1m) | `0.72` | Low system load |
+| Load Average (5m) | `1.75` | Moderate sustained load |
+| Load Average (15m) | `1.92` | Stable multi-process workload |
+| Total RAM | `8062.4 MiB` | Raspberry Pi 5 (8GB) |
+| Free RAM | `5901.2 MiB` | Large memory headroom remaining |
+| Used RAM | `562.0 MiB` | Actual application memory usage |
+| Buff/Cache | `1712.6 MiB` | Linux filesystem cache |
+| Available RAM | `7500.3 MiB` | Memory still available to applications |
+| Swap Usage | `0.0 MiB / 2048 MiB` | No swap pressure |
+| Total Tasks | `177` | System processes |
+| Running Tasks | `1` | Most services idle/waiting |
+| Sleeping Tasks | `176` | Normal Linux behavior |
+
+---
+
+## Detector Process Usage
+
+| PID | Process | CPU Usage | RAM Usage | Resident Memory | Runtime |
+|-----|---------|-----------|-----------|----------------|---------|
+| `1678671` | `python3` | `51.7%` | `1.6%` | `129072 KiB` | `1:17.53` |
+| `1678663` | `python3` | `19.0%` | `2.2%` | `184240 KiB` | `0:30.27` |
+
+---
+
+## Key Takeaways
+
+- ✅ CPU temperature remains within safe limits
+- ✅ Memory usage is extremely low for a 6-camera AI system
+- ✅ No swap usage indicates healthy RAM availability
+- ✅ System load remains stable during inference
+- ✅ Suitable for continuous 24/7 operation
+- ✅ Enough remaining resources for additional services or cameras
+
+The single most important factor is your hardware. If you are using a Raspberry Pi 5, the current setup 
+is likely already running much faster than the 200ms range due to the Pi 5's significantly improved CPU and RAM bandwidth.
+
 
 * **Performance Estimates**
 
@@ -503,7 +534,11 @@ WEBHOOK_SECRET="your_secure_webhook_key"
 
 ```
 
+**Example Detection**
 
+<img width="1151" height="236" alt="image" src="https://github.com/user-attachments/assets/974b7523-e794-4ac5-9ae0-bf3148693916" />
+
+---
 
 ---
 ### Footage
