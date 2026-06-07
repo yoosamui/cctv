@@ -318,7 +318,51 @@ camera name to its RTSP source (`cam_rtsp`) and the recorder upload endpoint
 (`rpi_url`). Camera names here must match the `--name` passed to the recorder and
 the keys used in the per-camera config sections.
 
----
+YOU NEED TO SET THE NODES RTSP URIs
+in the cctv-image-detector.py file.
+
+~~~
+# ==========================================
+# CAMERA NODES
+# ==========================================
+NODES = {
+    "Gate":     {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.99:554/Streaming/channels/102", "rpi_url": "http://192.168.1.14:5000/upload"},
+    "Center":   {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.82:554/Streaming/channels/102", "rpi_url": "http://192.168.1.13:5000/upload"},
+    "Entrance": {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.89:554/Streaming/channels/102", "rpi_url": "http://192.168.1.15:5000/upload"},
+    "Garage":   {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.81:554/Streaming/channels/102", "rpi_url": "http://192.168.1.16:5000/upload"},
+    "Behind":   {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.92:554/Streaming/channels/102", "rpi_url": "http://192.168.1.17:5000/upload"},
+    "Left":     {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.93:554/Streaming/channels/102", "rpi_url": "http://192.168.1.18:5000/upload"}
+}
+
+
+~~~
+
+
+## Detector installation
+```text
+
+make sure you have git,ffmpeg are install. if not
+ $ sudo apt update
+ $ sudo apt install git, ffmpeg
+ 
+ $ cd /home/pi
+ $ git clone https://github.com/yoosamui/cctv.git
+ $ cd cctv
+ $ keep only files we need.
+ $ rm -drf cctv-video ansible-cctv/ config.ini
+
+ $ sudo mkdir -p /etc/cctv
+ $ cd /etc/cctv
+ $ cp /home/pi/cctv/image_detector_config/*.* .
+ 
+```
+you have create the configuration files
+config.ini  credentials.env
+
+
+
+
+
 
 
 
@@ -332,6 +376,12 @@ the keys used in the per-camera config sections.
 - Close a `session_image_count` race (slot reserved under one lock, rolled back on
   failure) so concurrent uploads can't exceed `MAX_IMAGES_PER_SESSION`.
 - `DETECTOR_WEBHOOK_URL` configurable via `[NETWORK] detector_webhook_url`.
+ 
+**Detector 3.25.5**
+- Top-edge filter is now per-camera: [TOP_EDGE_CONFIG] (margin,high_conf) is
+- loaded via load_camera_config() with day/night overrides and passed to the
+- YOLO worker, instead of the single global pair. Cameras not listed fall
+- back to the global [FILTERS] TOP_EDGE_MARGIN / TOP_EDGE_HIGH_CONF.
 
 **Detector 3.25.4**
 - One session per recording segment: a stationary person no longer spawns a new
