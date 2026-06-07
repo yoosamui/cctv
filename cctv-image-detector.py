@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.25.4  cloude+deepseek
+# CCTV IMAGE DETECTOR - VERSION 3.25.5  cloude+deepseek
 # ==============================================================================
+#
+# IMPROVEMENTS in v3.25.5:
+#   1. Top-edge filter is now per-camera: [TOP_EDGE_CONFIG] (margin,high_conf) is
+#      loaded via load_camera_config() with day/night overrides and passed to the
+#      YOLO worker, instead of the single global pair. Cameras not listed fall
+#      back to the global [FILTERS] TOP_EDGE_MARGIN / TOP_EDGE_HIGH_CONF.
 #
 # IMPROVEMENTS in v3.25.4:
 #   1. Fixed continuous-presence session spam: a person standing still no longer
@@ -67,7 +73,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 
-VERSION = "3.25.4"
+VERSION = "3.25.5"
 
 # ==========================================
 # SILENCE LOGS
@@ -122,7 +128,8 @@ def load_camera_config(section_prefix):
     Load camera configuration with support for day/night overrides.
 
     Args:
-        section_prefix: 'CAMERA_MIN_AREA', 'CAMERA_MAX_AREA', or 'CAMERA_ASPECT_RATIO'
+        section_prefix: 'CAMERA_MIN_AREA', 'CAMERA_MAX_AREA', 'CAMERA_ASPECT_RATIO',
+            or 'TOP_EDGE_CONFIG'
 
     Returns:
         Dictionary with camera configurations merged from base and night overrides
@@ -134,6 +141,9 @@ def load_camera_config(section_prefix):
         if section_prefix == "CAMERA_ASPECT_RATIO":
             min_ratio, max_ratio = map(float, value.split(","))
             base_config[camera_name] = (min_ratio, max_ratio)
+        elif section_prefix == "TOP_EDGE_CONFIG":
+            margin_str, conf_str = value.split(",")
+            base_config[camera_name] = (int(margin_str), float(conf_str))
         else:
             base_config[camera_name] = int(value)
 
@@ -147,6 +157,10 @@ def load_camera_config(section_prefix):
                     min_ratio, max_ratio = map(float, value.split(","))
                     base_config[camera_name] = (min_ratio, max_ratio)
                     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🌙 NIGHT override: {camera_name} aspect ratio = ({min_ratio}, {max_ratio})")
+                elif section_prefix == "TOP_EDGE_CONFIG":
+                    margin_str, conf_str = value.split(",")
+                    base_config[camera_name] = (int(margin_str), float(conf_str))
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🌙 NIGHT override: {camera_name} top-edge = (margin={int(margin_str)}, high_conf={float(conf_str)})")
                 else:
                     base_config[camera_name] = int(value)
                     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🌙 NIGHT override: {camera_name} {section_prefix.split('_')[1]} = {value}")
@@ -224,6 +238,9 @@ FILTER_CONFIDENCE = cfg_float("FILTERS", "FILTER_CONFIDENCE")
 CAMERA_MIN_AREA = load_camera_config("CAMERA_MIN_AREA")
 CAMERA_MAX_AREA = load_camera_config("CAMERA_MAX_AREA")
 CAMERA_ASPECT_RATIOS = load_camera_config("CAMERA_ASPECT_RATIO")
+# Per-camera top-edge (margin, high_conf); falls back to global [FILTERS] values
+# for any camera not listed in [TOP_EDGE_CONFIG].
+CAMERA_TOP_EDGE = load_camera_config("TOP_EDGE_CONFIG")
 
 # Print loaded configuration
 print("\n" + "=" * 60)
@@ -236,6 +253,9 @@ for camera, value in CAMERA_MAX_AREA.items():
     print(f"  {camera} = {value}")
 print("CAMERA_ASPECT_RATIOS (final):")
 for camera, value in CAMERA_ASPECT_RATIOS.items():
+    print(f"  {camera} = {value[0]},{value[1]}")
+print("CAMERA_TOP_EDGE (final, margin,high_conf):")
+for camera, value in CAMERA_TOP_EDGE.items():
     print(f"  {camera} = {value[0]},{value[1]}")
 print("=" * 60)
 
@@ -966,7 +986,7 @@ def pending_email_watchdog():
 # ==========================================
 def config_reload_thread():
     """Reload camera configurations every hour to handle day/night transitions."""
-    global CAMERA_MIN_AREA, CAMERA_MAX_AREA, CAMERA_ASPECT_RATIOS
+    global CAMERA_MIN_AREA, CAMERA_MAX_AREA, CAMERA_ASPECT_RATIOS, CAMERA_TOP_EDGE
 
     while True:
         time.sleep(3600)
@@ -975,6 +995,7 @@ def config_reload_thread():
             CAMERA_MIN_AREA = new_min_area
             CAMERA_MAX_AREA = load_camera_config("CAMERA_MAX_AREA")
             CAMERA_ASPECT_RATIOS = load_camera_config("CAMERA_ASPECT_RATIO")
+            CAMERA_TOP_EDGE = load_camera_config("TOP_EDGE_CONFIG")
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Camera configs updated "
                   f"for {'DAY' if is_daytime() else 'NIGHT'}")
 
@@ -985,6 +1006,7 @@ def config_reload_thread():
 def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, max_aspect_ratio,
                         enable_area_filter, enable_aspect_filter, enable_dark_filter,
                         camera_min_area_dict, camera_max_area_dict, camera_aspect_ratios_dict,
+                        camera_top_edge_dict,
                         yolo_iou, debug_log_interval):
 
     import threading
@@ -1126,26 +1148,30 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                                   "area_too_large", area=area, min_value=max_area)
             return False
 
-        # Top-edge filter
+        # Top-edge filter — per-camera (margin, high_conf) from [TOP_EDGE_CONFIG],
+        # falling back to the global [FILTERS] values for any camera not listed.
         if ENABLE_TOP_EDGE_FILTER and image_height is not None:
+            top_margin, top_high_conf = camera_top_edge_dict.get(
+                camera_name, (TOP_EDGE_MARGIN, TOP_EDGE_HIGH_CONF)
+            )
             LABEL_MARGIN = 12
             top_y = y1
-            if top_y <= TOP_EDGE_MARGIN + LABEL_MARGIN:
-                if confidence < TOP_EDGE_HIGH_CONF:
+            if top_y <= top_margin + LABEL_MARGIN:
+                if confidence < top_high_conf:
                     with _log_lock:
                         now = time.time()
                         if now - _last_topedge_log_time.get(camera_name, 0) >= debug_log_interval:
                             _last_topedge_log_time[camera_name] = now
                             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: "
                                   f"Top-edge rejection - y1={top_y}, "
-                                  f"conf={confidence:.2f}<{TOP_EDGE_HIGH_CONF} REJECTED!")
+                                  f"conf={confidence:.2f}<{top_high_conf} REJECTED!")
 
                     if original_frame is not None and SAVE_REJECTED_IMAGES:
                         now = time.time()
                         if now - _last_topedge_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
                             _last_topedge_save_time[camera_name] = now
                             save_rejected_image(camera_name, original_frame, box, confidence,
-                                                "top_edge", top_y=top_y, min_conf=TOP_EDGE_HIGH_CONF)
+                                                "top_edge", top_y=top_y, min_conf=top_high_conf)
 
                     queue_rejection_email(camera_name, original_frame, box, confidence, "top_edge")
                     return False
@@ -1156,7 +1182,7 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                             _last_topedge_accept_log_time[camera_name] = now
                             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ [DEBUG] {camera_name}: "
                                   f"Top-edge HIGH CONF ACCEPT - y1={top_y}, "
-                                  f"conf={confidence:.2f}>={TOP_EDGE_HIGH_CONF}")
+                                  f"conf={confidence:.2f}>={top_high_conf}")
 
         return True
 
@@ -1195,6 +1221,7 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                     camera_min_area_dict = load_camera_config("CAMERA_MIN_AREA")
                     camera_max_area_dict = load_camera_config("CAMERA_MAX_AREA")
                     camera_aspect_ratios_dict = load_camera_config("CAMERA_ASPECT_RATIO")
+                    camera_top_edge_dict = load_camera_config("TOP_EDGE_CONFIG")
                     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 [WORKER] Camera configs "
                           f"reloaded for {'DAY' if current_daytime else 'NIGHT'}")
 
@@ -1284,6 +1311,7 @@ def start_yolo_worker(task_q, result_q):
         args=(task_q, result_q, MIN_PERSON_AREA, MIN_ASPECT_RATIO, MAX_ASPECT_RATIO,
               ENABLE_AREA_FILTER, ENABLE_ASPECT_FILTER, ENABLE_DARK_FILTER,
               CAMERA_MIN_AREA, CAMERA_MAX_AREA, CAMERA_ASPECT_RATIOS,
+              CAMERA_TOP_EDGE,
               YOLO_IOU, DEBUG_LOG_INTERVAL),
         daemon=True
     )
@@ -1302,6 +1330,7 @@ def check_yolo_health(task_q, result_q):
                 args=(task_q, result_q, MIN_PERSON_AREA, MIN_ASPECT_RATIO, MAX_ASPECT_RATIO,
                       ENABLE_AREA_FILTER, ENABLE_ASPECT_FILTER, ENABLE_DARK_FILTER,
                       CAMERA_MIN_AREA, CAMERA_MAX_AREA, CAMERA_ASPECT_RATIOS,
+                      CAMERA_TOP_EDGE,
                       YOLO_IOU, DEBUG_LOG_INTERVAL),
                 daemon=True
             )
@@ -1482,7 +1511,8 @@ if __name__ == "__main__":
     print(f"MIN_PERSON_AREA: {MIN_PERSON_AREA}")
     print(f"MIN_ASPECT_RATIO: {MIN_ASPECT_RATIO}")
     print(f"DRAW_BOUNDING_BOXES: {DRAW_BOUNDING_BOXES}")
-    print(f"TOP_EDGE_FILTER: {ENABLE_TOP_EDGE_FILTER} (margin={TOP_EDGE_MARGIN}px, high_conf={TOP_EDGE_HIGH_CONF})")
+    print(f"TOP_EDGE_FILTER: {ENABLE_TOP_EDGE_FILTER} (per-camera [TOP_EDGE_CONFIG]; "
+          f"global fallback margin={TOP_EDGE_MARGIN}px, high_conf={TOP_EDGE_HIGH_CONF})")
     print(f"AREA_FILTER: {ENABLE_AREA_FILTER}")
     print(f"ASPECT_FILTER: {ENABLE_ASPECT_FILTER}")
     print(f"DARK_FILTER: {ENABLE_DARK_FILTER} (threshold={DARKNESS_THRESHOLD}, "
