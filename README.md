@@ -135,7 +135,7 @@ stuck in `WAITING_RESET` after `WATCHDOG_TIMEOUT`.
 | 3     | Dark pixel        | Rejects boxes that are mostly dark (shadows/noise).                   |
 | 4     | Min area          | Per-camera `CAMERA_MIN_AREA`.                                         |
 | 5     | Max area          | Per-camera `CAMERA_MAX_AREA` — rejects headlights, close-up objects.  |
-| 6     | Top edge          | Rejects boxes hugging the top edge unless very confident.             |
+| 6     | Top edge          | Rejects boxes hugging the top edge unless very confident. Per-camera `(margin, high_conf)` from `[TOP_EDGE_CONFIG]`, falling back to the global `[FILTERS]` values. |
 
 **HTTP API** (default port `5001`)
 
@@ -203,15 +203,15 @@ journalctl -u cctv-video-recorder@Gate.service -f -o cat
 ## Installation and Configuration 
 
 ### Recorder — `config.ini` (next to the script)
-the recorder (cctv-video-recorder.py) in the heard of the cctv system.
+the recorder (cctv-video-recorder.py) is the heart of the cctv system.
 
 **step-1**
 
 ```text
  ssh in to your Rasberry pi terminal.
- make sure you have git,ffmpeg are install. if not
+ make sure git and ffmpeg are installed. if not:
  $ sudo apt update
- $ sudo apt install git, ffmpeg
+ $ sudo apt install git ffmpeg
  
  $ cd /home/pi
  $ git clone https://github.com/yoosamui/cctv.git
@@ -234,8 +234,8 @@ the recorder (cctv-video-recorder.py) in the heard of the cctv system.
  
  configure the recorder
  $ cd /home/pi/cctv
- $ nano config.ini. 
- made you changes and save
+ $ nano config.ini
+ make your changes and save
 
 ```
 
@@ -256,7 +256,7 @@ max_images_per_session = 3                      ; cap on detection frames
 flask_port = 5000
 detector_webhook_url = http://192.168.1.19:5001/session-reset   ; optional
 ```
-**NOTE:** detector_webhook_url = IP_OF_THE_IMAGE_DETECTOR_RPI5 
+**NOTE:** set `detector_webhook_url` to the detector (RPi 5) address — a full URL, e.g. `http://<RPI5_IP>:5001/session-reset`.
 
 
 After this the recorder is ready to run.
@@ -324,8 +324,8 @@ ALERT_TO="alerts@example.com"
 ```
 
 > `WEBHOOK_SECRET` must match on both nodes — it authenticates the `/upload` and
-  `/session-reset` calls between them. Email alerts are enabled only when
-  `SMTP_USER`, `SMTP_PASS`, and `ALERT_TO` are all set.
+> `/session-reset` calls between them. Email alerts are enabled only when
+> `SMTP_USER`, `SMTP_PASS`, and `ALERT_TO` are all set.
 
 ### Detector camera map
 
@@ -334,11 +334,16 @@ camera name to its RTSP source (`cam_rtsp`) and the recorder upload endpoint
 (`rpi_url`). Camera names here must match the `--name` passed to the recorder and
 the keys used in the per-camera config sections.
 
-> YOU NEED TO SET THE NODES rpi_url for all recorder cameras.
-  YOU ALSO NEED TO SET THE NODES cam_rtsp 
-  in the cctv-image-detector.py file.
+Note the detector's `cam_rtsp` uses each camera's **sub-stream**
+(`/Streaming/channels/102`, lower resolution — lighter for inference), while the
+recorder records the **main stream** (`/Streaming/channels/101`, full quality).
+This split is intentional.
 
-**rows 530 -542**
+> YOU NEED TO SET THE NODES rpi_url for all recorder cameras.
+> YOU ALSO NEED TO SET THE NODES cam_rtsp
+> in the cctv-image-detector.py file.
+
+**The `NODES` dict in `cctv-image-detector.py`:**
 ~~~
 # ==========================================
 # CAMERA NODES
@@ -361,27 +366,27 @@ NODES = {
 **Step-1**
 ```text
 
-make sure you have git,ffmpeg are install. if not
+make sure git and ffmpeg are installed. if not:
  $ sudo apt update
- $ sudo apt install git, ffmpeg
+ $ sudo apt install git ffmpeg
  
  $ cd /home/pi
  $ git clone https://github.com/yoosamui/cctv.git
  $ cd cctv
  $ keep only files we need.
- $ rm -drf cctv-video ansible-cctv/ config.ini
+ $ rm -drf cctv-video* ansible-cctv/ config.ini
 
  $ sudo mkdir -p /etc/cctv
  $ cd /etc/cctv
  $ cp /home/pi/cctv/image_detector_config/*.* .
 
-you have create the configuration files
+you have created the configuration files
 config.ini  credentials.env
-take your time and made the chnages you need and save the changes.
+take your time and make the changes you need and save the changes.
 ```
 
 
-The detetor is now ready  we can start it now.
+The detector is now ready; we can start it now.
 For this we also use a systemd service unit.
 
 **Step-2**
@@ -392,7 +397,7 @@ $ sudo cp cctv-image-detector.service /etc/systemd/system
 
 $ sudo systemctl restart cctv-image-detector.service
 $ sudo systemctl status cctv-image-detector.service
-$ sudo systemctl renable cctv-image-detector.service
+$ sudo systemctl enable cctv-image-detector.service
 
 journal log 
 $ journalctl -u cctv-image-detector.service  -f -o cat
@@ -464,10 +469,10 @@ source ~/cctv_env/bin/activate
 pip install --upgrade pip
 pip install numpy==1.26.4
 pip install opencv-python onnxruntime ultralytics flask requests python-dotenv
+```
 
 Ultralytics is required only to export YOLOv8 models to ONNX.
 The detector itself runs entirely on ONNX Runtime.
-```
 
 ####  Model Weights Deployment
 
@@ -535,10 +540,10 @@ Contributions and suggestions are welcome.
 - `DETECTOR_WEBHOOK_URL` configurable via `[NETWORK] detector_webhook_url`.
  
 **Detector 3.25.5**
-- Top-edge filter is now per-camera: [TOP_EDGE_CONFIG] (margin,high_conf) is
-- loaded via load_camera_config() with day/night overrides and passed to the
-- YOLO worker, instead of the single global pair. Cameras not listed fall
-- back to the global [FILTERS] TOP_EDGE_MARGIN / TOP_EDGE_HIGH_CONF.
+- Top-edge filter is now per-camera: `[TOP_EDGE_CONFIG]` (margin,high_conf) is
+  loaded via `load_camera_config()` with day/night overrides and passed to the
+  YOLO worker, instead of the single global pair. Cameras not listed fall back to
+  the global `[FILTERS]` `TOP_EDGE_MARGIN` / `TOP_EDGE_HIGH_CONF`.
 
 **Detector 3.25.4**
 - One session per recording segment: a stationary person no longer spawns a new
@@ -552,6 +557,7 @@ Contributions and suggestions are welcome.
 ## License
 
 Distributed under the MIT License. See [LICENSE](LICENSE) for more information.
-**current version:** 3.25.5, 1.8.7` 
+
+**Current version:** detector 3.25.5, recorder 1.8.7
 
 
