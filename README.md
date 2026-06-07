@@ -384,6 +384,7 @@ take your time and made the chnages you need and save the changes.
 
 The detetor is now reay and we can start it.
 for thsi we also use a systemd service unit.
+```
 
 ** Step-2**
 
@@ -394,6 +395,9 @@ $ sudo cp cctv-image-detector.service /etc/systemd/system
 $ sudo systemctl restart cctv-image-detector.service
 $ sudo systemctl status cctv-image-detector.service
 $ sudo systemctl renable cctv-image-detector.service
+
+journal log 
+$ journalctl -u cctv-image-detector.service  -f -o cat
 
 finish.
 ```
