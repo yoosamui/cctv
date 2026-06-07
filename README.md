@@ -539,7 +539,11 @@ WEBHOOK_SECRET="your_secure_webhook_key"
 <img width="1151" height="236" alt="image" src="https://github.com/user-attachments/assets/974b7523-e794-4ac5-9ae0-bf3148693916" />
 
 ---
+**Example rejected False Positive**
 
+<img width="1096" height="309" alt="image" src="https://github.com/user-attachments/assets/18ed7f4b-d03d-4862-adb8-0b6a31320837" />
+
+---
 ---
 ### Footage
 
