@@ -149,6 +149,39 @@ stuck in `WAITING_RESET` after `WATCHDOG_TIMEOUT`.
 | GET    | `/health`        | none               | Per-camera state/count + pending-email count     |
 
 
+
+## Requirements
+
+- Python 3
+- `ffmpeg` (recorder)
+- Python packages: `opencv-python`, `onnxruntime`, `numpy`, `flask`, `requests`,
+  `python-dotenv`
+- `yolov8n.onnx` in the detector's working directory
+
+---
+
+## Deployment (systemd)
+
+Both nodes ship templated/standard unit files:
+
+- **Recorder** — `cctv-video-recorder@.service` (instanced per camera):
+  ```bash
+  sudo systemctl enable --now cctv-video-recorder@Gate.service
+  ```
+  Reads `/etc/cctv/<camera>.conf` for the `URL` env var and runs
+  `--name <camera> --url ${URL}`.
+
+- **Detector** — `cctv-image-detector.service`:
+  ```bash
+  sudo systemctl enable --now cctv-image-detector.service
+  ```
+
+Logs go to the systemd journal:
+
+```bash
+journalctl -u cctv-image-detector.service -f
+journalctl -u cctv-video-recorder@Gate.service -f
+```
 ---
 
 ## Installation and Configuration 
@@ -287,38 +320,7 @@ the keys used in the per-camera config sections.
 
 ---
 
-## Requirements
 
-- Python 3
-- `ffmpeg` (recorder)
-- Python packages: `opencv-python`, `onnxruntime`, `numpy`, `flask`, `requests`,
-  `python-dotenv`
-- `yolov8n.onnx` in the detector's working directory
-
----
-
-## Deployment (systemd)
-
-Both nodes ship templated/standard unit files:
-
-- **Recorder** — `cctv-video-recorder@.service` (instanced per camera):
-  ```bash
-  sudo systemctl enable --now cctv-video-recorder@Gate.service
-  ```
-  Reads `/etc/cctv/<camera>.conf` for the `URL` env var and runs
-  `--name <camera> --url ${URL}`.
-
-- **Detector** — `cctv-image-detector.service`:
-  ```bash
-  sudo systemctl enable --now cctv-image-detector.service
-  ```
-
-Logs go to the systemd journal:
-
-```bash
-journalctl -u cctv-image-detector.service -f
-journalctl -u cctv-video-recorder@Gate.service -f
-```
 
 ---
 
