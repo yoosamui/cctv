@@ -187,13 +187,9 @@ YOLO_RESTART_DELAY = cfg_int("YOLO", "RESTART_DELAY")
 JPEG_QUALITY = cfg_int("IMAGE", "JPEG_QUALITY")
 DRAW_BOUNDING_BOXES = cfg_bool("IMAGE", "DRAW_BOUNDING_BOXES")
 
+# How long an incomplete session can go without a new detection before it's
+# considered abandoned and flushed to a pending email.
 SESSION_TIMEOUT = cfg_int("SESSION", "SESSION_TIMEOUT")
-# New: ACTIVE_SESSION_IDLE_TIMEOUT - how long an incomplete session can go without detections
-try:
-    ACTIVE_SESSION_IDLE_TIMEOUT = cfg_int("SESSION", "ACTIVE_SESSION_IDLE_TIMEOUT")
-except (configparser.NoOptionError, KeyError):
-    ACTIVE_SESSION_IDLE_TIMEOUT = 60
-    print(f"[INFO] ACTIVE_SESSION_IDLE_TIMEOUT not found in config, using default: {ACTIVE_SESSION_IDLE_TIMEOUT}s")
 
 WATCHDOG_TIMEOUT = cfg_int("SESSION", "WATCHDOG_TIMEOUT")
 WATCHDOG_CHECK = cfg_int("SESSION", "WATCHDOG_CHECK")
@@ -1409,10 +1405,10 @@ class CameraStream:
 # SESSION WATCHDOG - FIXED v3.25.3
 # 
 # Separate timeouts for different purposes:
-#   ACTIVE_SESSION_IDLE_TIMEOUT (60s): How long an incomplete session can go
-#     without a new detection before it's considered abandoned. When this
-#     expires, the session is cleaned up AND any captured frames are saved
-#     as a pending email so they aren't lost.
+#   SESSION_TIMEOUT: How long an incomplete session can go without a new
+#     detection before it's considered abandoned. When this expires, the
+#     session is cleaned up AND any captured frames are saved as a pending
+#     email so they aren't lost.
 #
 #   WATCHDOG_TIMEOUT: Safety net for a camera stuck in WAITING_RESET. A full
 #     session normally leaves WAITING_RESET when the recorder's /session-reset
@@ -1456,8 +1452,8 @@ def session_watchdog():
                 
                 # Handle ACTIVE session idle timeout (NO new detections for a while)
                 elif state.state == SessionState.ACTIVE and state.count > 0:
-                    if now - state.last_activity > ACTIVE_SESSION_IDLE_TIMEOUT:
-                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⏰ Session idle timeout: {name} - no detections for {ACTIVE_SESSION_IDLE_TIMEOUT}s")
+                    if now - state.last_activity > SESSION_TIMEOUT:
+                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⏰ Session idle timeout: {name} - no detections for {SESSION_TIMEOUT}s")
                         
                         # Save partial session as pending email so frames aren't lost
                         if state.count > 0 and state.detection_id:
@@ -1502,8 +1498,7 @@ if __name__ == "__main__":
     print(f"YOLO_INPUT_SIZE: {YOLO_INPUT_SIZE}")
     print(f"YOLO_IOU: {YOLO_IOU}")
     print(f"WEBHOOK_PORT: {WEBHOOK_PORT}")
-    print(f"SESSION_TIMEOUT: {SESSION_TIMEOUT}s (legacy, loaded but unused)")
-    print(f"ACTIVE_SESSION_IDLE_TIMEOUT: {ACTIVE_SESSION_IDLE_TIMEOUT}s (idle detection timeout)")
+    print(f"SESSION_TIMEOUT: {SESSION_TIMEOUT}s (idle detection timeout for active sessions)")
     print(f"WATCHDOG: {WATCHDOG_CHECK}s check interval, {WATCHDOG_TIMEOUT}s timeout for stuck sessions")
     print(f"COOLDOWN: {COOLDOWN}s (unified cooldown)")
     print(f"RESET_DEDUP_WINDOW: {RESET_DEDUP_WINDOW}s (ignore duplicate resets)")
