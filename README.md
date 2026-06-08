@@ -593,6 +593,12 @@ Contributions and suggestions are welcome.
 
 ---
 
+
+
+## Contributing
+Pull Requests welcome! Feel free to report issues.
+
+
 ## License
 
 Distributed under the MIT License. See [LICENSE](LICENSE) for more information.
