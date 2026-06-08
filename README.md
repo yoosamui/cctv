@@ -244,6 +244,14 @@ the recorder (cctv-video-recorder.py) is the heart of the cctv system.
 **/etc/cctv/config.ini**
 
 ```ini
+
+open this file and modify the settings.
+Modify settings reuires a service restart:
+
+$ sudo nano /etc/cctv/config.ini
+
+
+
 [STORAGE]
 base_dir = /media/share/cameras/cctv-storage   ; final recordings
 temp_dir = /tmp/cctv_staging                    ; staging before move
