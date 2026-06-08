@@ -223,6 +223,8 @@ the recorder (cctv-video-recorder.py) is the heart of the cctv system.
  $ sudo mkdir -p /etc/cctv
  $ cd /etc/cctv
  $ cp /home/pi/cctv/credentials/recorder/credentials.env .
+ $ mv /home/pi/cctv/config.ini .
+
 
  add you credentials and save.
  $ nano credentials.env
@@ -239,7 +241,7 @@ the recorder (cctv-video-recorder.py) is the heart of the cctv system.
 
 ```
 
-**config.ini**
+**/etc/cctv/config.ini**
 
 ```ini
 [STORAGE]
