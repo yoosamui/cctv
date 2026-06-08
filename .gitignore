@@ -3,7 +3,7 @@
 *.txt
 *.yml
 *.un~
-*.env
+# *.env
 *.conf
 *.onnx
 *.onnx_*
