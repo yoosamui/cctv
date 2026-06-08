@@ -35,9 +35,10 @@ from dotenv import load_dotenv
 VERSION = "1.8.7"
 
 # ================= CONFIGURATION LOADING =================
+#config = configparser.ConfigParser()
+#config_file = os.path.join(os.path.dirname(__file__), '/etc/cctv/config.ini')
 config = configparser.ConfigParser()
-config_file = os.path.join(os.path.dirname(__file__), '/etc/cctv/config.ini')
-
+config_file = '/etc/cctv/config.ini'
 
 def load_config():
     """Reads settings from config.ini with fallback defaults."""
