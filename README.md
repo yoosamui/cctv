@@ -202,7 +202,7 @@ journalctl -u cctv-video-recorder@Gate.service -f -o cat
 
 ## Installation and Configuration 
 
-### Recorder — `config.ini` (next to the script)
+### Recorder — `/etc/cctv/config.ini` 
 the recorder (cctv-video-recorder.py) is the heart of the cctv system.
 
 **step-1**
