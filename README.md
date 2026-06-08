@@ -222,7 +222,7 @@ the recorder (cctv-video-recorder.py) is the heart of the cctv system.
  credentials
  $ sudo mkdir -p /etc/cctv
  $ cd /etc/cctv
- $ cp /home/pi/cctv/credentials/recorder/credentials.env .
+ $ mv /home/pi/cctv/credentials.env .
  $ mv /home/pi/cctv/config.ini .
 
 
