@@ -1,23 +1,20 @@
-#!/usr/bin/env python3
-# ==============================================================================
-# CCTV RECORDER WITH PERSON DETECTION - VERSION 1.8.7 
-# ==============================================================================
-#
-# Version: 1.8.7 - Improved Cleanup & Performance & security
-# Changes in 1.8.7:
-#  1. ffmpeg RTSP timeout flag is auto-detected (-stimeout on ffmpeg <5.0,
-#     -timeout on >=5.0) so a Pi OS upgrade can't silently break recording.
-#  2. TEMP_DIR (staging) is now swept for orphaned files left by failed moves
-#     (e.g. share unmounted) so /tmp can no longer fill up segment-by-segment.
-#  3. Closed a race on session_image_count: the cap check and the count bump
-#     now happen under one lock (slot reserved before save, rolled back on
-#     failure) so concurrent uploads can't exceed MAX_IMAGES_PER_SESSION.
-#  4. DETECTOR_WEBHOOK_URL is now configurable via [NETWORK] detector_webhook_url.
-#
-#
-# AUTHOR: yoosamui
-# DATE: 2026-06-05
-# ==============================================================================
+# Full CCTV Recorder Code v1.8.7 - Fixed (Returns 200 instead of 429)
+
+"""
+CCTV Recorder with Person Detection
+====================================
+Version: 1.8.7 - Improved Cleanup & Performance & security
+
+Changes in 1.8.7:
+  1. ffmpeg RTSP timeout flag is auto-detected (-stimeout on ffmpeg <5.0,
+     -timeout on >=5.0) so a Pi OS upgrade can't silently break recording.
+  2. TEMP_DIR (staging) is now swept for orphaned files left by failed moves
+     (e.g. share unmounted) so /tmp can no longer fill up segment-by-segment.
+  3. Closed a race on session_image_count: the cap check and the count bump
+     now happen under one lock (slot reserved before save, rolled back on
+     failure) so concurrent uploads can't exceed MAX_IMAGES_PER_SESSION.
+  4. DETECTOR_WEBHOOK_URL is now configurable via [NETWORK] detector_webhook_url.
+"""
 
 import subprocess
 import time
@@ -39,7 +36,7 @@ VERSION = "1.8.7"
 
 # ================= CONFIGURATION LOADING =================
 config = configparser.ConfigParser()
-config_file = os.path.join(os.path.dirname(__file__), 'config.ini')
+config_file = os.path.join(os.path.dirname(__file__), '/etc/cctv/config.ini')
 
 
 def load_config():
@@ -425,7 +422,7 @@ def upload_image():
 
         print(
             f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
-            f"📸 {camera_name}: IMAGE "
+            f"⚡ {camera_name}: IMAGE "
             f"{current_count}/{total_frames} "
             f"(ID: {detection_id})",
             flush=True
