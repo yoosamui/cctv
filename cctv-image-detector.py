@@ -304,6 +304,35 @@ def draw_text_safe(img, text, x, y, font_scale, color, thickness=1):
         y = img.shape[0] - 5
     cv2.putText(img, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, font_scale, color, thickness)
 
+
+def compute_label_position(box, block_w, block_h, first_line_h, img_w, img_h, margin=10):
+    """Pick a top-left anchor for a text block that stays inside the image and
+    clear of the detection box.
+
+    Returns (text_x, text_y) where text_y is the BASELINE of the first line.
+    Tries, in order: right of the box, left of the box, below it, above it —
+    taking the first region that fully fits. Only if none fit does it fall back
+    to clamping the block into the frame (which may overlap the box).
+    """
+    x1, y1, x2, y2 = box
+    # Right / left: horizontally clear of the box; clamp top into the frame.
+    top = max(0, min(y1, img_h - block_h))
+    if x2 + margin + block_w <= img_w:
+        return x2 + margin, top + first_line_h
+    if x1 - margin - block_w >= 0:
+        return x1 - margin - block_w, top + first_line_h
+    # Below / above: vertically clear of the box; clamp left into the frame.
+    left = max(0, min(x1, img_w - block_w))
+    if y2 + margin + block_h <= img_h:
+        return left, y2 + margin + first_line_h
+    if y1 - margin - block_h >= 0:
+        return left, y1 - margin - block_h + first_line_h
+    # Nothing fits cleanly: clamp the block's top-left corner into the frame.
+    left = max(0, min(x1, img_w - block_w))
+    top = max(0, min(y1, img_h - block_h))
+    return left, top + first_line_h
+
+
 def save_rejected_image(camera_name, frame, box, confidence, reason,
                         aspect_ratio=None, area=None, min_value=None,
                         top_y=None, min_conf=None):
@@ -373,19 +402,9 @@ def save_rejected_image(camera_name, frame, box, confidence, reason,
 
         line_spacing = 22
         total_text_height = sum(line_heights) + (len(lines) - 1) * line_spacing
-        text_x = x2 + 10
-        text_y = y1 + line_heights[0]
-
-        if text_x + max_width > img_width:
-            text_x = x1 - max_width - 10
-            if text_x < 0:
-                text_x = x1
-                text_y = y2 + line_heights[0] + 10
-
-        if text_y + total_text_height > img_height:
-            text_y = max(line_heights[0] + 5, img_height - total_text_height - 10)
-        if text_y - line_heights[0] < 0:
-            text_y = line_heights[0] + 5
+        text_x, text_y = compute_label_position(
+            box, max_width, total_text_height, line_heights[0], img_width, img_height
+        )
 
         for i, line in enumerate(lines):
             (w, h), _ = cv2.getTextSize(line, font, font_scale, thickness)
@@ -904,19 +923,9 @@ def send_rejection_email(camera_name, frame, box, confidence, reason,
 
         line_spacing = 22
         total_text_height = sum(line_heights) + (len(lines) - 1) * line_spacing
-        text_x = x2 + 10
-        text_y = y1 + line_heights[0]
-
-        if text_x + max_width > img_width:
-            text_x = x1 - max_width - 10
-            if text_x < 0:
-                text_x = x1
-                text_y = y2 + line_heights[0] + 10
-
-        if text_y + total_text_height > img_height:
-            text_y = max(line_heights[0] + 5, img_height - total_text_height - 10)
-        if text_y - line_heights[0] < 0:
-            text_y = y2 + line_heights[0] + 5
+        text_x, text_y = compute_label_position(
+            box, max_width, total_text_height, line_heights[0], img_width, img_height
+        )
 
         draw_text_with_background(annotated_frame, line1, (text_x, text_y),            0.5, yellow, (0, 0, 0))
         draw_text_with_background(annotated_frame, line2, (text_x, text_y + 24),       0.5, yellow, (0, 0, 0))
