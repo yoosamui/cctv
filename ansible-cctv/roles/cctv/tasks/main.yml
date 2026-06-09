@@ -49,7 +49,17 @@
     mode: '0644'
   register: creds_file
 
-
+# --- deploy config ---
+- name: copy CCTV config
+  become: yes
+  copy:
+    src: "../config.ini"
+    dest: "/etc/cctv/config.ini"
+    owner: pi
+    group: pi
+    mode: '0644'
+  register: conf_file
+  
 - name: Restart CCTV recorder service
   become: yes
   systemd:
