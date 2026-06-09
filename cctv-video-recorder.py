@@ -756,7 +756,7 @@ def cleanup_temp_dir():
             f"❌ Temp cleanup failed: {e}"
         )
 
-####JUAN
+
 
 # ================= SHARED-STORAGE CLEANUP LOCK =================
 # All 6 recorders share BASE_DIR, so if every node runs cleanup_old_recordings()
@@ -853,12 +853,12 @@ def run_shared_cleanup():
             flush=True
         )
 
-################################################
+
+
 def cleanup_worker():
     """Background thread that runs cleanup on a schedule."""
 
     # Run cleanup immediately on startup
-    ### cleanup_old_recordings()
     run_shared_cleanup()
     cleanup_temp_dir()
 
@@ -867,7 +867,6 @@ def cleanup_worker():
         time.sleep(CLEANUP_INTERVAL_HOURS * 3600)
 
         if not shutdown_flag:
-           ### cleanup_old_recordings()
             run_shared_cleanup()
             cleanup_temp_dir()
 
@@ -985,7 +984,7 @@ def recording_loop():
                     filename
                 )
                 
-                # REMOVED: cleanup_old_recordings() from here - now runs in background thread
+                
 
         except subprocess.CalledProcessError as e:
 
