@@ -165,7 +165,7 @@ def load_camera_config(section_prefix):
                     base_config[camera_name] = int(value)
                     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🌙 NIGHT override: {camera_name} {section_prefix.split('_')[1]} = {value}")
         else:
-            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🌙 No night overrides for {section_prefix}, using daytime defaults")
+            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ☀️  No night overrides for {section_prefix}, using daytime defaults")
 
     return base_config
 
@@ -321,19 +321,23 @@ def save_rejected_image(camera_name, frame, box, confidence, reason,
         cv2.rectangle(debug_frame, (x1, y1), (x2, y2), yellow, 1)
         timestamp = time.strftime('%Y-%m-%d_%H%M%S')
 
+        box_area = width * height
+        # Common suffix with box geometry (x,y,w,h) and area for all rejections.
+        geom = f"_box{x1}-{y1}-{width}x{height}_area{box_area}px"
+
         if reason == "area":
-            filename = f"[{timestamp}]_{camera_name}_area_small_{area}px_conf{confidence:.2f}.jpg"
+            filename = f"[{timestamp}]_{camera_name}_area_small_{area}px_conf{confidence:.2f}{geom}.jpg"
         elif reason == "area_too_large":
-            filename = f"[{timestamp}]_{camera_name}_area_large_{area}px_conf{confidence:.2f}.jpg"
+            filename = f"[{timestamp}]_{camera_name}_area_large_{area}px_conf{confidence:.2f}{geom}.jpg"
         elif reason == "aspect":
             ar = aspect_ratio if aspect_ratio is not None else 0
-            filename = f"[{timestamp}]_{camera_name}_aspect_{ar:.2f}_conf{confidence:.2f}.jpg"
+            filename = f"[{timestamp}]_{camera_name}_aspect_{ar:.2f}_conf{confidence:.2f}{geom}.jpg"
         elif reason == "top_edge":
-            filename = f"[{timestamp}]_{camera_name}_topedge_y{top_y}_conf{confidence:.2f}.jpg"
+            filename = f"[{timestamp}]_{camera_name}_topedge_y{top_y}_conf{confidence:.2f}{geom}.jpg"
         elif reason == "dark_pixels":
-            filename = f"[{timestamp}]_{camera_name}_dark_conf{confidence:.2f}.jpg"
+            filename = f"[{timestamp}]_{camera_name}_dark_conf{confidence:.2f}{geom}.jpg"
         else:
-            filename = f"[{timestamp}]_{camera_name}_{reason}_conf{confidence:.2f}.jpg"
+            filename = f"[{timestamp}]_{camera_name}_{reason}_conf{confidence:.2f}{geom}.jpg"
 
         filepath = os.path.join(REJECTED_IMAGES_DIR, filename)
 
@@ -1049,12 +1053,14 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
             camera_name, (min_aspect_ratio, max_aspect_ratio)
         )
 
-        # Aspect-ratio (shape) filter — ALWAYS applied, even for high-confidence
-        # detections. A standing person is taller than wide; a box outside the
-        # configured ratio range is not a person no matter how confident YOLO is.
-        # This runs BEFORE the high-confidence bypass so confident-but-wrong wide
-        # boxes (e.g. vehicles) are rejected instead of emailed.
-        if enable_aspect_filter and width > 0:
+        # Aspect-ratio (shape) filter — applied only to LOW-confidence detections
+        # (conf < FILTER_CONFIDENCE). A standing person is taller than wide, but a
+        # genuine person with arms outstretched / carrying something / bending can
+        # produce a near-square box; rejecting those on shape drops real people.
+        # In practice false-positive wide boxes (e.g. vehicles) score low, so the
+        # shape check still catches them here, while high-confidence detections are
+        # trusted and fall through to the bypass below.
+        if enable_aspect_filter and width > 0 and confidence < FILTER_CONFIDENCE:
             aspect_ratio_val = height / width
             if aspect_ratio_val < min_ratio or aspect_ratio_val > max_ratio:
                 with _log_lock:
@@ -1076,7 +1082,7 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                                       "aspect", aspect_ratio=aspect_ratio_val)
                 return False
 
-        # High confidence bypass (shape already validated above)
+        # High confidence bypass — trusted detection, shape check skipped above
         if confidence >= FILTER_CONFIDENCE:
             return True
 
