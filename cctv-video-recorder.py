@@ -95,6 +95,14 @@ MAX_IMAGES_PER_SESSION = config.getint(
     fallback=6
 )
 
+# Seconds of upload inactivity after which a detection session is treated as
+# stale and its image counter reset (see [RECORDING] session_stale_timeout).
+SESSION_STALE_TIMEOUT = config.getint(
+    'RECORDING',
+    'session_stale_timeout',
+    fallback=300
+)
+
 FLASK_PORT = config.getint(
     'NETWORK',
     'flask_port',
@@ -162,8 +170,6 @@ last_detection_time = 0
 prefix_lock = Lock()
 
 shutdown_flag = False
-
-SESSION_STALE_TIMEOUT = 300
 
 move_executor = ThreadPoolExecutor(max_workers=4)
 
