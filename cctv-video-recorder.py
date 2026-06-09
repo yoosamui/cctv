@@ -756,12 +756,110 @@ def cleanup_temp_dir():
             f"❌ Temp cleanup failed: {e}"
         )
 
+####JUAN
 
+# ================= SHARED-STORAGE CLEANUP LOCK =================
+# All 6 recorders share BASE_DIR, so if every node runs cleanup_old_recordings()
+# they race: two nodes shutil.rmtree() the same expired date folder at once and
+# one hits FileNotFoundError mid-walk, which aborts that node's whole sweep.
+# This advisory lock lets a single node own the shared sweep per cycle; the
+# others skip it. cleanup_temp_dir() stays unguarded — it only touches local
+# /tmp staging. (O_EXCL create is atomic on local FS and CIFS/NFSv3+; if the
+# share is a filesystem without atomic exclusive-create this is best-effort.)
+CLEANUP_LOCK_PATH = os.path.join(BASE_DIR, ".cleanup.lock")
+
+# A node that crashes mid-cleanup leaves the lock behind; treat a lock older
+# than this as abandoned and reclaim it. Generous because rmtree of a full date
+# folder can take minutes.
+CLEANUP_LOCK_STALE_SECONDS = 3600  # 1 hour
+
+
+def _write_cleanup_lock():
+    """Atomically create the lock file. Returns True if we now own it."""
+    fd = os.open(CLEANUP_LOCK_PATH, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    try:
+        os.write(
+            fd,
+            f"{CAM_NAME} pid={os.getpid()} "
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n".encode()
+        )
+    finally:
+        os.close(fd)
+    return True
+
+
+def acquire_cleanup_lock():
+    """Try to claim exclusive ownership of the shared-storage sweep."""
+    try:
+        return _write_cleanup_lock()
+    except FileExistsError:
+        pass  # Lock already exists
+
+    # Lock exists — check if stale
+    try:
+        age = time.time() - os.path.getmtime(CLEANUP_LOCK_PATH)
+    except FileNotFoundError:
+        # Lock was released between our attempt and check
+        try:
+            return _write_cleanup_lock()
+        except FileExistsError:
+            return False
+
+    if age <= CLEANUP_LOCK_STALE_SECONDS:
+        return False  # held by a live peer
+
+    # Stale lock: reclaim
+    try:
+        os.remove(CLEANUP_LOCK_PATH)
+        print(
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"🧹 Reclaimed stale cleanup lock",
+            flush=True
+        )
+    except FileNotFoundError:
+        pass  # another peer already removed it
+
+    try:
+        return _write_cleanup_lock()
+    except FileExistsError:
+        return False
+
+
+def release_cleanup_lock():
+    """Release the cleanup lock safely."""
+    try:
+        os.remove(CLEANUP_LOCK_PATH)
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        print(
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"⚠️ Failed to release cleanup lock: {e}",
+            flush=True
+        )
+
+
+def run_shared_cleanup():
+    """Run cleanup_old_recordings() only if we can acquire the lock."""
+    if acquire_cleanup_lock():
+        try:
+            cleanup_old_recordings()
+        finally:
+            release_cleanup_lock()
+    else:
+        print(
+            f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] "
+            f"⏭️ Skipping shared-storage cleanup — another node holds the lock",
+            flush=True
+        )
+
+################################################
 def cleanup_worker():
     """Background thread that runs cleanup on a schedule."""
 
     # Run cleanup immediately on startup
-    cleanup_old_recordings()
+    ### cleanup_old_recordings()
+    run_shared_cleanup()
     cleanup_temp_dir()
 
     # Then run at configured interval
@@ -769,7 +867,8 @@ def cleanup_worker():
         time.sleep(CLEANUP_INTERVAL_HOURS * 3600)
 
         if not shutdown_flag:
-            cleanup_old_recordings()
+           ### cleanup_old_recordings()
+            run_shared_cleanup()
             cleanup_temp_dir()
 
 
