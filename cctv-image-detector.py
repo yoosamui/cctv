@@ -1,7 +1,17 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.25.5  cloude+deepseek
+# CCTV IMAGE DETECTOR - VERSION 3.26.0  cloude+deepseek
 # ==============================================================================
+#
+# IMPROVEMENTS in v3.26.0:
+#   1. Added per-camera exclusion-zone filter [CAMERA_EXCLUDE_ZONE]: detections
+#      whose bounding box is mostly inside a fixed ignore region are rejected.
+#      Targets static false positives at a permanent location (clutter, fixtures
+#      such as a hanging clothes rack) that score as "person". Runs FIRST, at ALL
+#      confidence levels (before the FILTER_CONFIDENCE high-conf bypass). Rejection
+#      is coverage-based (EXCLUDE_ZONE_COVERAGE, default 0.6 of box area), so a real
+#      person clipping the edge of the region is still detected. Zones honor
+#      day/night overrides and are reloaded by the worker on transition.
 #
 # IMPROVEMENTS in v3.25.5:
 #   1. Top-edge filter is now per-camera: [TOP_EDGE_CONFIG] (margin,high_conf) is
@@ -73,7 +83,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 
-VERSION = "3.25.5"
+VERSION = "3.26.0"
 
 # ==========================================
 # SILENCE LOGS
@@ -123,13 +133,31 @@ def is_daytime():
     current_hour = now.hour
     return DAY_START_HOUR <= current_hour < DAY_END_HOUR
 
+def parse_zones(value):
+    """Parse 'x1,y1,x2,y2; x1,y1,x2,y2; ...' into a list of (x1,y1,x2,y2) int
+    tuples. Whitespace and trailing semicolons are tolerated; malformed groups
+    (not exactly 4 ints) are skipped."""
+    zones = []
+    for part in value.split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            coords = [int(c.strip()) for c in part.split(",")]
+        except ValueError:
+            continue
+        if len(coords) == 4:
+            zones.append(tuple(coords))
+    return zones
+
+
 def load_camera_config(section_prefix):
     """
     Load camera configuration with support for day/night overrides.
 
     Args:
         section_prefix: 'CAMERA_MIN_AREA', 'CAMERA_MAX_AREA', 'CAMERA_ASPECT_RATIO',
-            or 'TOP_EDGE_CONFIG'
+            'TOP_EDGE_CONFIG', or 'CAMERA_EXCLUDE_ZONE'
 
     Returns:
         Dictionary with camera configurations merged from base and night overrides
@@ -144,6 +172,8 @@ def load_camera_config(section_prefix):
         elif section_prefix == "TOP_EDGE_CONFIG":
             margin_str, conf_str = value.split(",")
             base_config[camera_name] = (int(margin_str), float(conf_str))
+        elif section_prefix == "CAMERA_EXCLUDE_ZONE":
+            base_config[camera_name] = parse_zones(value)
         else:
             base_config[camera_name] = int(value)
 
@@ -161,6 +191,9 @@ def load_camera_config(section_prefix):
                     margin_str, conf_str = value.split(",")
                     base_config[camera_name] = (int(margin_str), float(conf_str))
                     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🌙 NIGHT override: {camera_name} top-edge = (margin={int(margin_str)}, high_conf={float(conf_str)})")
+                elif section_prefix == "CAMERA_EXCLUDE_ZONE":
+                    base_config[camera_name] = parse_zones(value)
+                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🌙 NIGHT override: {camera_name} exclude zones = {base_config[camera_name]}")
                 else:
                     base_config[camera_name] = int(value)
                     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🌙 NIGHT override: {camera_name} {section_prefix.split('_')[1]} = {value}")
@@ -208,6 +241,13 @@ ENABLE_ASPECT_FILTER = cfg_bool("FILTERS", "ENABLE_ASPECT_FILTER")
 ENABLE_TOP_EDGE_FILTER = cfg_bool("FILTERS", "ENABLE_TOP_EDGE_FILTER")
 ENABLE_DARK_FILTER = cfg_bool("FILTERS", "ENABLE_DARK_FILTER")
 
+# Exclusion-zone filter — rejects detections that sit inside a fixed ignore
+# region (static clutter, fixtures). Defensive fallbacks so a config that
+# predates this feature still loads.
+ENABLE_EXCLUDE_ZONE_FILTER = config.getboolean("FILTERS", "ENABLE_EXCLUDE_ZONE_FILTER", fallback=True)
+# Fraction of the detection box that must fall inside a zone to reject it.
+EXCLUDE_ZONE_COVERAGE = config.getfloat("FILTERS", "EXCLUDE_ZONE_COVERAGE", fallback=0.6)
+
 MIN_PERSON_AREA = cfg_int("FILTERS", "MIN_PERSON_AREA")
 MIN_ASPECT_RATIO = cfg_float("FILTERS", "MIN_ASPECT_RATIO")
 MAX_ASPECT_RATIO = cfg_float("FILTERS", "MAX_ASPECT_RATIO")
@@ -237,6 +277,9 @@ CAMERA_ASPECT_RATIOS = load_camera_config("CAMERA_ASPECT_RATIO")
 # Per-camera top-edge (margin, high_conf); falls back to global [FILTERS] values
 # for any camera not listed in [TOP_EDGE_CONFIG].
 CAMERA_TOP_EDGE = load_camera_config("TOP_EDGE_CONFIG")
+# Per-camera exclusion zones (list of (x1,y1,x2,y2)); empty if section absent.
+CAMERA_EXCLUDE_ZONES = (load_camera_config("CAMERA_EXCLUDE_ZONE")
+                        if config.has_section("CAMERA_EXCLUDE_ZONE") else {})
 
 # Print loaded configuration
 print("\n" + "=" * 60)
@@ -253,6 +296,9 @@ for camera, value in CAMERA_ASPECT_RATIOS.items():
 print("CAMERA_TOP_EDGE (final, margin,high_conf):")
 for camera, value in CAMERA_TOP_EDGE.items():
     print(f"  {camera} = {value[0]},{value[1]}")
+print(f"EXCLUDE ZONES (enabled={ENABLE_EXCLUDE_ZONE_FILTER}, coverage={EXCLUDE_ZONE_COVERAGE}):")
+for camera, value in CAMERA_EXCLUDE_ZONES.items():
+    print(f"  {camera} = {value}")
 print("=" * 60)
 
 
@@ -365,6 +411,8 @@ def save_rejected_image(camera_name, frame, box, confidence, reason,
             filename = f"[{timestamp}]_{camera_name}_topedge_y{top_y}_conf{confidence:.2f}{geom}.jpg"
         elif reason == "dark_pixels":
             filename = f"[{timestamp}]_{camera_name}_dark_conf{confidence:.2f}{geom}.jpg"
+        elif reason == "exclude_zone":
+            filename = f"[{timestamp}]_{camera_name}_excludezone_conf{confidence:.2f}{geom}.jpg"
         else:
             filename = f"[{timestamp}]_{camera_name}_{reason}_conf{confidence:.2f}{geom}.jpg"
 
@@ -382,6 +430,8 @@ def save_rejected_image(camera_name, frame, box, confidence, reason,
         elif reason == "dark_pixels":
             dark_percent = int(DARK_PIXEL_RATIO * 100)
             line1 = f"REJECTED: Too many dark pixels (>{dark_percent}%)"
+        elif reason == "exclude_zone":
+            line1 = "REJECTED: In exclusion zone"
         else:
             line1 = f"REJECTED: {reason}"
 
@@ -901,6 +951,9 @@ def send_rejection_email(camera_name, frame, box, confidence, reason,
             subject = f"⚠️ CCTV Rejection: Dark pixels on {camera_name}"
             dark_percent = int(DARK_PIXEL_RATIO * 100)
             line1 = f"REJECTED: Too many dark pixels (>{dark_percent}%)"
+        elif reason == "exclude_zone":
+            subject = f"⚠️ CCTV Rejection: Exclusion zone on {camera_name}"
+            line1 = "REJECTED: In exclusion zone"
         else:
             subject = f"⚠️ CCTV Rejection: {reason} on {camera_name}"
             line1 = f"REJECTED: {reason}"
@@ -1015,7 +1068,8 @@ def config_reload_thread():
 def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, max_aspect_ratio,
                         enable_area_filter, enable_aspect_filter, enable_dark_filter,
                         camera_min_area_dict, camera_max_area_dict, camera_aspect_ratios_dict,
-                        camera_top_edge_dict,
+                        camera_top_edge_dict, camera_exclude_zones_dict,
+                        enable_exclude_zone_filter, exclude_zone_coverage,
                         yolo_iou, debug_log_interval):
 
     import threading
@@ -1026,12 +1080,14 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
     _last_topedge_log_time = {}
     _last_topedge_accept_log_time = {}
     _last_dark_log_time = {}
+    _last_exclude_log_time = {}
 
     _last_area_save_time = {}
     _last_maxarea_save_time = {}
     _last_aspect_save_time = {}
     _last_topedge_save_time = {}
     _last_dark_save_time = {}
+    _last_exclude_save_time = {}
 
     _log_lock = threading.Lock()
 
@@ -1061,6 +1117,44 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
         min_ratio, max_ratio = camera_aspect_ratios_dict.get(
             camera_name, (min_aspect_ratio, max_aspect_ratio)
         )
+
+        # Exclusion-zone filter — reject detections that sit inside a fixed
+        # ignore region (static clutter, fixtures like a hanging clothes rack).
+        # Runs FIRST, at ALL confidence levels (before the high-conf bypass
+        # below) because a static object can occasionally score above
+        # FILTER_CONFIDENCE. A detection is rejected only when at least
+        # `exclude_zone_coverage` of its box area falls inside a zone, so a real
+        # person who merely clips the edge of the region is still detected.
+        if enable_exclude_zone_filter and camera_exclude_zones_dict:
+            zones = camera_exclude_zones_dict.get(camera_name)
+            if zones:
+                box_area = max(1, width * height)
+                for zx1, zy1, zx2, zy2 in zones:
+                    ix1 = max(x1, zx1)
+                    iy1 = max(y1, zy1)
+                    ix2 = min(x2, zx2)
+                    iy2 = min(y2, zy2)
+                    if ix2 > ix1 and iy2 > iy1:
+                        covered = (ix2 - ix1) * (iy2 - iy1) / box_area
+                        if covered >= exclude_zone_coverage:
+                            with _log_lock:
+                                now = time.time()
+                                if now - _last_exclude_log_time.get(camera_name, 0) >= debug_log_interval:
+                                    _last_exclude_log_time[camera_name] = now
+                                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: "
+                                          f"In exclude zone ({covered:.0%} of box in "
+                                          f"{(zx1, zy1, zx2, zy2)}) conf={confidence:.2f} REJECTED!")
+
+                            if original_frame is not None and SAVE_REJECTED_IMAGES:
+                                now = time.time()
+                                if now - _last_exclude_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
+                                    _last_exclude_save_time[camera_name] = now
+                                    save_rejected_image(camera_name, original_frame, box, confidence,
+                                                        "exclude_zone")
+
+                            queue_rejection_email(camera_name, original_frame, box, confidence,
+                                                  "exclude_zone")
+                            return False
 
         # Aspect-ratio (shape) filter — applied only to LOW-confidence detections
         # (conf < FILTER_CONFIDENCE). A standing person is taller than wide, but a
@@ -1233,6 +1327,8 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                     camera_max_area_dict = load_camera_config("CAMERA_MAX_AREA")
                     camera_aspect_ratios_dict = load_camera_config("CAMERA_ASPECT_RATIO")
                     camera_top_edge_dict = load_camera_config("TOP_EDGE_CONFIG")
+                    if config.has_section("CAMERA_EXCLUDE_ZONE"):
+                        camera_exclude_zones_dict = load_camera_config("CAMERA_EXCLUDE_ZONE")
                     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 [WORKER] Camera configs "
                           f"reloaded for {'DAY ☀️' if current_daytime else 'NIGHT 🌙'}")
  
@@ -1322,7 +1418,8 @@ def start_yolo_worker(task_q, result_q):
         args=(task_q, result_q, MIN_PERSON_AREA, MIN_ASPECT_RATIO, MAX_ASPECT_RATIO,
               ENABLE_AREA_FILTER, ENABLE_ASPECT_FILTER, ENABLE_DARK_FILTER,
               CAMERA_MIN_AREA, CAMERA_MAX_AREA, CAMERA_ASPECT_RATIOS,
-              CAMERA_TOP_EDGE,
+              CAMERA_TOP_EDGE, CAMERA_EXCLUDE_ZONES,
+              ENABLE_EXCLUDE_ZONE_FILTER, EXCLUDE_ZONE_COVERAGE,
               YOLO_IOU, DEBUG_LOG_INTERVAL),
         daemon=True
     )
@@ -1341,7 +1438,8 @@ def check_yolo_health(task_q, result_q):
                 args=(task_q, result_q, MIN_PERSON_AREA, MIN_ASPECT_RATIO, MAX_ASPECT_RATIO,
                       ENABLE_AREA_FILTER, ENABLE_ASPECT_FILTER, ENABLE_DARK_FILTER,
                       CAMERA_MIN_AREA, CAMERA_MAX_AREA, CAMERA_ASPECT_RATIOS,
-                      CAMERA_TOP_EDGE,
+                      CAMERA_TOP_EDGE, CAMERA_EXCLUDE_ZONES,
+                      ENABLE_EXCLUDE_ZONE_FILTER, EXCLUDE_ZONE_COVERAGE,
                       YOLO_IOU, DEBUG_LOG_INTERVAL),
                 daemon=True
             )
