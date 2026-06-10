@@ -7,6 +7,7 @@
 *.conf
 *.onnx
 *.onnx_*
+
 __pycache__/
 *.py[codz]
 *$py.class
@@ -14,6 +15,7 @@ infos.txt
 # C extensions
 *.so
 # Distribution / packaging
+images/
 credentials/
 cctv_media/
 rejected/
