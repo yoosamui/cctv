@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.26.0  cloude+deepseek
+# CCTV IMAGE DETECTOR - VERSION 3.26.1  cloude+deepseek
 # ==============================================================================
+#
+# IMPROVEMENTS in v3.26.1:
+#   1. Added DRAW_ZONES ([IMAGE], default false): when on, the per-camera
+#      exclusion zones are drawn (orange, labeled "ZONE") on rejected images and
+#      rejection emails — for ALL rejection reasons, not only exclude_zone — so
+#      the regions can be visually tuned against the boxes being caught.
 #
 # IMPROVEMENTS in v3.26.0:
 #   1. Added per-camera exclusion-zone filter [CAMERA_EXCLUDE_ZONE]: detections
@@ -83,7 +89,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.image import MIMEImage
 
-VERSION = "3.26.0"
+VERSION = "3.26.1"
 
 # ==========================================
 # SILENCE LOGS
@@ -219,6 +225,8 @@ YOLO_RESTART_DELAY = cfg_int("YOLO", "RESTART_DELAY")
 
 JPEG_QUALITY = cfg_int("IMAGE", "JPEG_QUALITY")
 DRAW_BOUNDING_BOXES = cfg_bool("IMAGE", "DRAW_BOUNDING_BOXES")
+# Draw the per-camera exclusion zones on rejected images (for tuning).
+DRAW_ZONES = config.getboolean("IMAGE", "DRAW_ZONES", fallback=False)
 
 # How long an incomplete session can go without a new detection before it's
 # considered abandoned and flushed to a pending email.
@@ -379,9 +387,21 @@ def compute_label_position(box, block_w, block_h, first_line_h, img_w, img_h, ma
     return left, top + first_line_h
 
 
+def draw_exclude_zones(img, zones):
+    """Draw exclusion-zone rectangles (orange, labeled) on an image in place."""
+    if not zones:
+        return
+    orange = (0, 128, 255)
+    for zx1, zy1, zx2, zy2 in zones:
+        cv2.rectangle(img, (zx1, zy1), (zx2, zy2), orange, 2)
+        label_y = zy1 + 14 if zy1 < 14 else zy1 - 5
+        cv2.putText(img, "ZONE", (zx1 + 3, label_y),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, orange, 1)
+
+
 def save_rejected_image(camera_name, frame, box, confidence, reason,
                         aspect_ratio=None, area=None, min_value=None,
-                        top_y=None, min_conf=None):
+                        top_y=None, min_conf=None, zones=None):
     """Save rejected detection image for debugging."""
     if not SAVE_REJECTED_IMAGES:
         return
@@ -393,6 +413,8 @@ def save_rejected_image(camera_name, frame, box, confidence, reason,
         img_height, img_width = frame.shape[:2]
         debug_frame = frame.copy()
         yellow = (0, 255, 255)
+        if DRAW_ZONES:
+            draw_exclude_zones(debug_frame, zones)
         cv2.rectangle(debug_frame, (x1, y1), (x2, y2), yellow, 1)
         timestamp = time.strftime('%Y-%m-%d_%H%M%S')
 
@@ -932,6 +954,8 @@ def send_rejection_email(camera_name, frame, box, confidence, reason,
 
         annotated_frame = frame.copy()
         yellow = (0, 255, 255)
+        if DRAW_ZONES:
+            draw_exclude_zones(annotated_frame, CAMERA_EXCLUDE_ZONES.get(camera_name))
         cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), yellow, 1)
 
         if reason == "area":
@@ -1118,6 +1142,10 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
             camera_name, (min_aspect_ratio, max_aspect_ratio)
         )
 
+        # Camera's exclude zones — used by the filter below and, when DRAW_ZONES
+        # is on, drawn on every rejected image (any reason) so they can be tuned.
+        zones = camera_exclude_zones_dict.get(camera_name) if camera_exclude_zones_dict else None
+
         # Exclusion-zone filter — reject detections that sit inside a fixed
         # ignore region (static clutter, fixtures like a hanging clothes rack).
         # Runs FIRST, at ALL confidence levels (before the high-conf bypass
@@ -1125,36 +1153,34 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
         # FILTER_CONFIDENCE. A detection is rejected only when at least
         # `exclude_zone_coverage` of its box area falls inside a zone, so a real
         # person who merely clips the edge of the region is still detected.
-        if enable_exclude_zone_filter and camera_exclude_zones_dict:
-            zones = camera_exclude_zones_dict.get(camera_name)
-            if zones:
-                box_area = max(1, width * height)
-                for zx1, zy1, zx2, zy2 in zones:
-                    ix1 = max(x1, zx1)
-                    iy1 = max(y1, zy1)
-                    ix2 = min(x2, zx2)
-                    iy2 = min(y2, zy2)
-                    if ix2 > ix1 and iy2 > iy1:
-                        covered = (ix2 - ix1) * (iy2 - iy1) / box_area
-                        if covered >= exclude_zone_coverage:
-                            with _log_lock:
-                                now = time.time()
-                                if now - _last_exclude_log_time.get(camera_name, 0) >= debug_log_interval:
-                                    _last_exclude_log_time[camera_name] = now
-                                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: "
-                                          f"In exclude zone ({covered:.0%} of box in "
-                                          f"{(zx1, zy1, zx2, zy2)}) conf={confidence:.2f} REJECTED!")
+        if enable_exclude_zone_filter and zones:
+            box_area = max(1, width * height)
+            for zx1, zy1, zx2, zy2 in zones:
+                ix1 = max(x1, zx1)
+                iy1 = max(y1, zy1)
+                ix2 = min(x2, zx2)
+                iy2 = min(y2, zy2)
+                if ix2 > ix1 and iy2 > iy1:
+                    covered = (ix2 - ix1) * (iy2 - iy1) / box_area
+                    if covered >= exclude_zone_coverage:
+                        with _log_lock:
+                            now = time.time()
+                            if now - _last_exclude_log_time.get(camera_name, 0) >= debug_log_interval:
+                                _last_exclude_log_time[camera_name] = now
+                                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: "
+                                      f"In exclude zone ({covered:.0%} of box in "
+                                      f"{(zx1, zy1, zx2, zy2)}) conf={confidence:.2f} REJECTED!")
 
-                            if original_frame is not None and SAVE_REJECTED_IMAGES:
-                                now = time.time()
-                                if now - _last_exclude_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
-                                    _last_exclude_save_time[camera_name] = now
-                                    save_rejected_image(camera_name, original_frame, box, confidence,
-                                                        "exclude_zone")
+                        if original_frame is not None and SAVE_REJECTED_IMAGES:
+                            now = time.time()
+                            if now - _last_exclude_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
+                                _last_exclude_save_time[camera_name] = now
+                                save_rejected_image(camera_name, original_frame, box, confidence,
+                                                    "exclude_zone", zones=zones)
 
-                            queue_rejection_email(camera_name, original_frame, box, confidence,
-                                                  "exclude_zone")
-                            return False
+                        queue_rejection_email(camera_name, original_frame, box, confidence,
+                                              "exclude_zone")
+                        return False
 
         # Aspect-ratio (shape) filter — applied only to LOW-confidence detections
         # (conf < FILTER_CONFIDENCE). A standing person is taller than wide, but a
@@ -1179,7 +1205,7 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                     if now - _last_aspect_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
                         _last_aspect_save_time[camera_name] = now
                         save_rejected_image(camera_name, original_frame, box, confidence,
-                                            "aspect", aspect_ratio=aspect_ratio_val)
+                                            "aspect", aspect_ratio=aspect_ratio_val, zones=zones)
 
                 queue_rejection_email(camera_name, original_frame, box, confidence,
                                       "aspect", aspect_ratio=aspect_ratio_val)
@@ -1206,7 +1232,7 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                     if now - _last_dark_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
                         _last_dark_save_time[camera_name] = now
                         save_rejected_image(camera_name, original_frame, box, confidence,
-                                            "dark_pixels", min_value=int(DARK_PIXEL_RATIO * 100))
+                                            "dark_pixels", min_value=int(DARK_PIXEL_RATIO * 100), zones=zones)
 
                 queue_rejection_email(camera_name, original_frame, box, confidence, "dark_pixels")
                 return False
@@ -1226,7 +1252,7 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                 if now - _last_area_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
                     _last_area_save_time[camera_name] = now
                     save_rejected_image(camera_name, original_frame, box, confidence,
-                                        "area", area=area, min_value=min_area)
+                                        "area", area=area, min_value=min_area, zones=zones)
 
             queue_rejection_email(camera_name, original_frame, box, confidence,
                                   "area", area=area, min_value=min_area)
@@ -1247,7 +1273,7 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                 if now - _last_maxarea_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
                     _last_maxarea_save_time[camera_name] = now
                     save_rejected_image(camera_name, original_frame, box, confidence,
-                                        "area_too_large", area=area, min_value=max_area)
+                                        "area_too_large", area=area, min_value=max_area, zones=zones)
 
             queue_rejection_email(camera_name, original_frame, box, confidence,
                                   "area_too_large", area=area, min_value=max_area)
@@ -1276,7 +1302,7 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                         if now - _last_topedge_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
                             _last_topedge_save_time[camera_name] = now
                             save_rejected_image(camera_name, original_frame, box, confidence,
-                                                "top_edge", top_y=top_y, min_conf=top_high_conf)
+                                                "top_edge", top_y=top_y, min_conf=top_high_conf, zones=zones)
 
                     queue_rejection_email(camera_name, original_frame, box, confidence, "top_edge")
                     return False
