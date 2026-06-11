@@ -357,11 +357,14 @@ This split is intentional.
 ### Camera Recorder Configuration
 
 > Before starting the system, update the following configuration values:
-
 > 1. **Set the `rpi_url` node** for each recorder camera.
 > 2. **Set the `cam_rtsp` node** in the `cctv-image-detector.py` file.
 > 3. Replace the default username (`yoo`) with the appropriate camera username.
 > 4. Configure the camera password in:
+
+
+Use the same password value in the RTSP URL configuration. The {password} placeholder in the cam_rtsp node will be automatically resolved using the CAM_PASS value from credentials.env.
+
 
    ```bash
 
