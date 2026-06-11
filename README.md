@@ -1,6 +1,6 @@
 # Raspberry Pi Multi-Camera CCTV Recorder & Person Detector
 
-**Project Status:** Current Version:`detector 3.25.5,  recorder 1.8.7`
+**Project Status:** Current Version:`detector 3.26.1,  recorder 1.8.7`
 
 > This project is actively under development. Features, APIs, configuration parameters, and documentation may change between releases.
 
@@ -17,7 +17,7 @@ segment** — with aggressive false-positive filtering in between.
 | Item              | Value                            |
 | ----------------- | -------------------------------- |
 | Recorder version  | `1.8.7`                          |
-| Detector version  | `3.25.5`                         |
+| Detector version  | `3.26.1`                         |
 | Detector model    | YOLOv8n (ONNX Runtime, CPU)      |
 | Detector hardware | Raspberry Pi 5 (1 node, all cams)|
 | Recorder hardware | Raspberry Pi 4B (1 node per cam) |
@@ -136,7 +136,10 @@ stuck in `WAITING_RESET` after `WATCHDOG_TIMEOUT`.
 | 4     | Min area          | Per-camera `CAMERA_MIN_AREA`.                                         |
 | 5     | Max area          | Per-camera `CAMERA_MAX_AREA` — rejects headlights, close-up objects.  |
 | 6     | Top edge          | Rejects boxes hugging the top edge unless very confident. Per-camera `(margin, high_conf)` from `[TOP_EDGE_CONFIG]`, falling back to the global `[FILTERS]` values. |
+| 7     | exclude zones     | Per-camera exclusion zones — detections whose box is mostly inside one of |
 
+
+exclude_zone
 **HTTP API** (default port `5001`)
 
 | Method | Path             | Auth (`X-API-KEY`) | Purpose                                          |
@@ -613,6 +616,6 @@ Pull Requests welcome! Feel free to report issues.
 
 Distributed under the MIT License. See [LICENSE](LICENSE) for more information.
 
-**Current version:** detector 3.25.5, recorder 1.8.7
+**Current version:** detector 3.26.1, recorder 1.8.7
 
 
