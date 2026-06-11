@@ -565,10 +565,31 @@ WEBHOOK_SECRET="your_secure_webhook_key"
 ---
 ### Footage
 
-<img width="652" height="514" alt="image" src="https://github.com/user-attachments/assets/40604a3e-3ece-4447-b4f3-6e8b7bb77040" />
 
-
-
+| Filename | Size | Type |
+|----------|------|------|
+| 2026-06-02_14-13-04_Gate.mp4 | 54.8 MB | Video |
+| 2026-06-02_14-18-06_Gate.mp4 | 62.6 MB | Video |
+| 2026-06-02_14-23-07_Gate.mp4 | 60.5 MB | Video |
+| 2026-06-02_14-23-07_Gate_DETECTION_9b703362_2026-06-02_14-25-55-226.jpg | 55.5 kB | Image |
+| 2026-06-02_14-23-07_Gate_DETECTION_9b703362_2026-06-02_14-26-10-245.jpg | 56.2 kB | Image |
+| 2026-06-02_14-23-07_Gate_DETECTION_9b703362_2026-06-02_14-26-13-244.jpg | 56.3 kB | Image |
+| 2026-06-02_14-28-07_Gate.mp4 | 58.1 MB | Video |
+| 2026-06-02_14-28-07_Gate_DETECTION_880bcde7_2026-06-02_14-28-15-395.jpg | 55.8 kB | Image |
+| 2026-06-02_14-28-07_Gate_DETECTION_880bcde7_2026-06-02_14-28-33-431.jpg | 58.9 kB | Image |
+| 2026-06-02_14-28-07_Gate_DETECTION_880bcde7_2026-06-02_14-28-36-437.jpg | 57.1 kB | Image |
+| 2026-06-02_14-33-09_Gate.mp4 | 54.8 MB | Video |
+| 2026-06-02_14-33-09_Gate.mp4 | 51.4 MB | Video |
+| 2026-06-02_14-43-11_Gate.mp4 | 61.5 MB | Video |
+| 2026-06-02_14-48-12_Gate.mp4 | 67.0 MB | Video |
+| 2026-06-02_14-53-13_Gate.mp4 | 67.2 MB | Video |
+| 2026-06-02_14-58-14_Gate.mp4 | 67.2 MB | Video |
+| 2026-06-02_15-03-15_Gate.mp4 | 66.2 MB | Video |
+| 2026-06-02_15-08-16_Gate.mp4 | 63.9 MB | Video |
+| 2026-06-02_15-13-17_Gate.mp4 | 64.8 MB | Video |
+| 2026-06-02_15-13-17_Gate_DETECTION_836a884a_2026-06-02_15-15-28-183.jpg | 49.3 kB | Image |
+| 2026-06-02_15-13-17_Gate_DETECTION_836a884a_2026-06-02_15-15-37-222.jpg | 53.5 kB | Image |
+| 2026-06-02_15-13-17_Gate_DETECTION_836a884a_2026-06-02_15-15-40-199.jpg | 53.6 kB | Image |
 
 
 ## Roadmap
