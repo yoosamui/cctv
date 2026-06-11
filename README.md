@@ -606,6 +606,39 @@ WEBHOOK_SECRET="your_secure_webhook_key"
 | 2026-06-02_15-13-17_Gate_DETECTION_836a884a_2026-06-02_15-15-40-199.jpg | 53.6 kB | Image |
 
 
+## in this setup Camera Video Settings
+
+| Parameter | Configuration |
+|-----------|---------------|
+| Stream Type | Main Stream (Normal) |
+| Resolution | 1280 × 720P |
+| Encoding | H.264 |
+| Profile | Main Profile |
+| Frame Rate | 25 fps |
+| Bitrate Type | Variable |
+| Max. Bitrate | 2048 Kbps |
+| Video Quality | Medium |
+| H.264+ | Disabled |
+| I-Frame Interval | 48 |
+| Smoothing | 50 |
+
+
+## in this setup Camera Sub-Stream Settings
+
+| Parameter | Configuration |
+|-----------|---------------|
+| Stream Type | Sub-stream |
+| Resolution | 640 × 360 |
+| Encoding | H.264 |
+| Profile | Main Profile |
+| Frame Rate | 15 fps |
+| Bitrate Type | Variable |
+| Max. Bitrate | 2048 Kbps |
+| Video Quality | Medium |
+| I-Frame Interval | 15 |
+| Smoothing | 50 |
+
+
 ## Roadmap
 
 Planned future improvements:
