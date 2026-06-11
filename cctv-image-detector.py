@@ -212,7 +212,7 @@ def load_camera_config(section_prefix):
 # ==========================================
 # CONFIGURATION
 # ==========================================
-ANALYSIS_INTERVAL = cfg_int("GENERAL", "ANALYSIS_INTERVAL")
+ANALYSIS_INTERVAL = cfg_float("GENERAL", "ANALYSIS_INTERVAL")
 MAX_IMAGES = cfg_int("GENERAL", "MAX_IMAGES")
 COOLDOWN = cfg_float("GENERAL", "COOLDOWN")
 CAM_THREAD_SLEEP = cfg_float("GENERAL", "CAM_THREAD_SLEEP")
