@@ -357,8 +357,12 @@ This split is intentional.
 > YOU ALSO NEED TO SET THE NODES cam_rtsp
 > in the cctv-image-detector.py file.
 
+replace the user name 'yoo'.
+set the CAM_PASS=<password> in the **/etc/cctv/credentials.env** file. This password will be use in rtsp NODE {password}.
+
 **The `NODES` dict in `cctv-image-detector.py`:**
 ~~~
+
 # ==========================================
 # CAMERA NODES
 # ==========================================
