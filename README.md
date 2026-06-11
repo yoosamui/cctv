@@ -139,7 +139,7 @@ stuck in `WAITING_RESET` after `WATCHDOG_TIMEOUT`.
 | 7     | exclude zones     | Per-camera exclusion zones — detections whose box is mostly inside one of |
 
 
-exclude_zone
+
 **HTTP API** (default port `5001`)
 
 | Method | Path             | Auth (`X-API-KEY`) | Purpose                                          |
@@ -206,7 +206,8 @@ journalctl -u cctv-video-recorder@Gate.service -f -o cat
 ## Installation and Configuration 
 
 ### Recorder — `/etc/cctv/config.ini` 
-the recorder (cctv-video-recorder.py) is the heart of the cctv system.
+The cctv-video-recorder.py is the core engine of the CCTV system - 
+a rock-solid video recording module that works independently without requiring the detector.
 
 **step-1**
 
@@ -356,8 +357,12 @@ This split is intentional.
 > YOU ALSO NEED TO SET THE NODES cam_rtsp
 > in the cctv-image-detector.py file.
 
+replace the user name 'yoo'.
+set the CAM_PASS=<password> in the **/etc/cctv/credentials.env** file. This password will be use in rtsp NODE {password}.
+
 **The `NODES` dict in `cctv-image-detector.py`:**
 ~~~
+
 # ==========================================
 # CAMERA NODES
 # ==========================================
