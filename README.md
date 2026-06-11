@@ -139,7 +139,7 @@ stuck in `WAITING_RESET` after `WATCHDOG_TIMEOUT`.
 | 7     | exclude zones     | Per-camera exclusion zones — detections whose box is mostly inside one of |
 
 
-exclude_zone
+
 **HTTP API** (default port `5001`)
 
 | Method | Path             | Auth (`X-API-KEY`) | Purpose                                          |
@@ -206,7 +206,8 @@ journalctl -u cctv-video-recorder@Gate.service -f -o cat
 ## Installation and Configuration 
 
 ### Recorder — `/etc/cctv/config.ini` 
-the recorder (cctv-video-recorder.py) is the heart of the cctv system.
+The cctv-video-recorder.py is the core engine of the CCTV system - 
+a rock-solid video recording module that works independently without requiring the detector.
 
 **step-1**
 
