@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==============================================================================
-# CCTV IMAGE DETECTOR - VERSION 3.26.1  cloude+deepseek
+# CCTV IMAGE DETECTOR - VERSION 3.26.1  
 # ==============================================================================
 #
 # IMPROVEMENTS in v3.26.1:
@@ -289,6 +289,7 @@ CAMERA_TOP_EDGE = load_camera_config("TOP_EDGE_CONFIG")
 CAMERA_EXCLUDE_ZONES = (load_camera_config("CAMERA_EXCLUDE_ZONE")
                         if config.has_section("CAMERA_EXCLUDE_ZONE") else {})
 
+time.sleep(4)
 # Print loaded configuration
 print("\n" + "=" * 60)
 print(f"TIME: {'☀️ DAY' if is_daytime() else '🌙 NIGHT'}")
@@ -497,11 +498,12 @@ def save_rejected_image(camera_name, frame, box, confidence, reason,
 
 
 # ==========================================
-# DARK PIXEL FILTER FUNCTION
+# DARK PIXEL FILTER FUNCTION - UPDATED TO RETURN PERCENTAGE
 # ==========================================
 def is_dark_detection(frame, box, darkness_threshold=50, dark_pixel_ratio=0.3):
     """
     Check if a detection contains too many dark pixels.
+    Returns: (is_dark, dark_percentage)  # dark_percentage in 0–100
     """
     x1, y1, x2, y2 = box
     x1 = max(0, x1)
@@ -510,18 +512,18 @@ def is_dark_detection(frame, box, darkness_threshold=50, dark_pixel_ratio=0.3):
     y2 = min(frame.shape[0], y2)
 
     if x2 <= x1 or y2 <= y1:
-        return False
+        return False, 0.0
 
     roi = frame[y1:y2, x1:x2]
     if roi.size == 0:
-        return False
+        return False, 0.0
 
     gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
     _, dark_mask = cv2.threshold(gray, darkness_threshold, 255, cv2.THRESH_BINARY_INV)
     dark_pixels = cv2.countNonZero(dark_mask)
     total_pixels = roi.shape[0] * roi.shape[1]
     dark_ratio = dark_pixels / total_pixels if total_pixels > 0 else 0
-    return dark_ratio > dark_pixel_ratio
+    return dark_ratio > dark_pixel_ratio, dark_ratio * 100
 
 
 # ==========================================
@@ -619,16 +621,20 @@ SMTP_PASS = os.getenv("SMTP_PASS")
 ALERT_TO   = os.getenv("ALERT_TO")
 ENABLE_EMAIL_ALERTS = bool(SMTP_USER and SMTP_PASS and ALERT_TO)
 
+
+#   "Gate":     {"cam_rtsp": f"rtps://yoo:{password}@192.168.1.99:554/Streaming/channels/102", "rpi_url": "http://192.168.1.14:5000/upload"},
+# rtsp://127.0.0.1:8554/Center
+
 # ==========================================
 # CAMERA NODES
 # ==========================================
 NODES = {
-    "Gate":     {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.99:554/Streaming/channels/102", "rpi_url": "http://192.168.1.14:5000/upload"},
-    "Center":   {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.82:554/Streaming/channels/102", "rpi_url": "http://192.168.1.13:5000/upload"},
-    "Entrance": {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.89:554/Streaming/channels/102", "rpi_url": "http://192.168.1.15:5000/upload"},
-    "Garage":   {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.81:554/Streaming/channels/102", "rpi_url": "http://192.168.1.16:5000/upload"},
-    "Behind":   {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.92:554/Streaming/channels/102", "rpi_url": "http://192.168.1.17:5000/upload"},
-    "Left":     {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.93:554/Streaming/channels/102", "rpi_url": "http://192.168.1.18:5000/upload"}
+    "Gate":     {"cam_rtsp": f"rtsp://192.168.1.19:8554/gate_sub", "rpi_url": "http://192.168.1.14:5000/upload"},
+    "Center":   {"cam_rtsp": f"rtsp://192.168.1.19:8554/center_sub", "rpi_url": "http://192.168.1.13:5000/upload"},
+    "Entrance": {"cam_rtsp": f"rtsp://192.168.1.19:8554/entrance_sub", "rpi_url": "http://192.168.1.15:5000/upload"},
+    "Garage":   {"cam_rtsp": f"rtsp://192.168.1.19:8554/garage_sub", "rpi_url": "http://192.168.1.16:5000/upload"},
+    "Behind":   {"cam_rtsp": f"rtsp://192.168.1.19:8554/behind_sub", "rpi_url": "http://192.168.1.17:5000/upload"},
+    "Left":     {"cam_rtsp": f"rtsp://192.168.1.19:8554/left_sub", "rpi_url": "http://192.168.1.18:5000/upload"}
 }
 
 # ==========================================
@@ -1085,7 +1091,7 @@ def config_reload_thread():
             print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 Camera configs updated "
                   f"for {'DAY ☀️' if is_daytime() else 'NIGHT 🌙'}")
 
- 
+
 # ==========================================
 # YOLO WORKER PROCESS
 # ==========================================
@@ -1215,16 +1221,19 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
         if confidence >= FILTER_CONFIDENCE:
             return True
 
-        # Dark pixel filter
+        # ==========================================
+        # DARK PIXEL FILTER - UPDATED to show actual percentage
+        # ==========================================
         if enable_dark_filter and confidence < FILTER_CONFIDENCE:
-            if is_dark_detection(original_frame, box, DARKNESS_THRESHOLD, DARK_PIXEL_RATIO):
+            is_dark, dark_percent_actual = is_dark_detection(original_frame, box, DARKNESS_THRESHOLD, DARK_PIXEL_RATIO)
+            if is_dark:
                 with _log_lock:
                     now = time.time()
                     if now - _last_dark_log_time.get(camera_name, 0) >= debug_log_interval and ENABLE_DEBUG_PRINTS:
                         _last_dark_log_time[camera_name] = now
-                        dark_percent = int(DARK_PIXEL_RATIO * 100)
+                        dark_threshold_percent = int(DARK_PIXEL_RATIO * 100)
                         print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: "
-                              f"Too many dark pixels (> {dark_percent}%) - "
+                              f"Too many dark pixels ({dark_percent_actual:.1f}% dark > {dark_threshold_percent}% threshold) - "
                               f"box: {width}x{height}px conf={confidence:.2f} REJECTED!")
 
                 if original_frame is not None and SAVE_REJECTED_IMAGES:
@@ -1357,7 +1366,7 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                         camera_exclude_zones_dict = load_camera_config("CAMERA_EXCLUDE_ZONE")
                     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 [WORKER] Camera configs "
                           f"reloaded for {'DAY ☀️' if current_daytime else 'NIGHT 🌙'}")
- 
+
             name, frame, ts, capture_time = input_q.get(timeout=0.5)
 
             h, w = frame.shape[:2]

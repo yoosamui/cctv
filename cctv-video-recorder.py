@@ -914,7 +914,7 @@ def recording_loop():
         filename = f"{current_video_prefix}.mp4"
 
         local_path = os.path.join(TEMP_DIR, filename)
-
+"""
         cmd = [
             "ffmpeg",
             "-hide_banner",
@@ -936,6 +936,32 @@ def recording_loop():
             "1",
             local_path
         ]
+"""
+
+	cmd = [
+	    "ffmpeg",
+	    "-hide_banner",
+	    "-loglevel",
+	    "error",
+	    "-rtsp_transport",
+	    "tcp",
+	    FFMPEG_TIMEOUT_FLAG,
+	    "5000000",
+	    "-i",
+	    URL,
+	    "-c:v",
+	    "copy",
+	    "-map",
+	    "0:v:0",
+	    "-t",
+	    str(SEGMENT_DURATION),
+	    "-reset_timestamps",
+	    "1",
+	    "-movflags",
+	    "+faststart",
+	    local_path
+	]
+
 
         try:
 
