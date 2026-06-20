@@ -1362,10 +1362,26 @@ def yolo_worker_process(input_q, output_q, min_person_area, min_aspect_ratio, ma
                     camera_max_area_dict = load_camera_config("CAMERA_MAX_AREA")
                     camera_aspect_ratios_dict = load_camera_config("CAMERA_ASPECT_RATIO")
                     camera_top_edge_dict = load_camera_config("TOP_EDGE_CONFIG")
+                    
                     if config.has_section("CAMERA_EXCLUDE_ZONE"):
                         camera_exclude_zones_dict = load_camera_config("CAMERA_EXCLUDE_ZONE")
-                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🔄 [WORKER] Camera configs "
-                          f"reloaded for {'DAY ☀️' if current_daytime else 'NIGHT 🌙'}")
+                        
+                    print(
+                        f"Gate={camera_min_area_dict.get('Gate')} "
+                        f"Center={camera_min_area_dict.get('Center')} "
+                        f"Entrance={camera_min_area_dict.get('Entrance')} "
+                        f"Garage={camera_min_area_dict.get('Garage')} "
+                        f"Behind={camera_min_area_dict.get('Behind')} "
+                        f"Left={camera_min_area_dict.get('Left')} "
+                    )
+    
+    
+                    print(
+                        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
+                        f"🔄 [WORKER] Camera configs reloaded for "
+                        f"{'DAY ☀️' if current_daytime else 'NIGHT 🌙'}"
+                    )
+    
 
             name, frame, ts, capture_time = input_q.get(timeout=0.5)
 
