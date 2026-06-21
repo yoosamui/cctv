@@ -15,6 +15,7 @@ infos.txt
 # C extensions
 *.so
 # Distribution / packaging
+cctv-hikvision-timestamp.py
 images/
 credentials/
 cctv_media/
