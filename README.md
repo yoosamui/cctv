@@ -374,24 +374,76 @@ Use the same password value in the RTSP URL configuration. The {password} placeh
    ```
 
 
-**The `NODES` dict in `cctv-image-detector.py`:**
+## cctv-mediamtx 
+
+This is a web-based CCTV live monitoring dashboard powered by MediaMTX + HLS streaming, designed to display multiple IP camera feeds in a responsive grid.
+
+It uses HLS.js to play .m3u8 streams served from a MediaMTX server and includes a custom UI for monitoring stream health in real time.
+
+This  multi-camera live surveillance dashboard  connects to a MediaMTX streaming server and displays six  camera feeds in a clean, responsive web interface.
+
+Each camera stream is pulled via HLS (.m3u8) from a MediaMTX endpoint and rendered in HTML5 video players with automatic recovery, latency tuning, and status indicators.
+
+the MediaMTX is also used from the image-detector.
+
+**Configure the mediamtx**
 ~~~
 
-# ==========================================
-# CAMERA NODES
-# ==========================================
-NODES = {
-    "Gate":     {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.99:554/Streaming/channels/102", "rpi_url": "http://192.168.1.14:5000/upload"},
-    "Center":   {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.82:554/Streaming/channels/102", "rpi_url": "http://192.168.1.13:5000/upload"},
-    "Entrance": {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.89:554/Streaming/channels/102", "rpi_url": "http://192.168.1.15:5000/upload"},
-    "Garage":   {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.81:554/Streaming/channels/102", "rpi_url": "http://192.168.1.16:5000/upload"},
-    "Behind":   {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.92:554/Streaming/channels/102", "rpi_url": "http://192.168.1.17:5000/upload"},
-    "Left":     {"cam_rtsp": f"rtsp://yoo:{password}@192.168.1.93:554/Streaming/channels/102", "rpi_url": "http://192.168.1.18:5000/upload"}
-}
+# log in into your RPI 5 via SSH
+$ git clone https://github.com/yoosamui/cctv-mediamtx.git
+$ cd cctv-mediamtx 
+$ cp /home/pi/cctv/mediamtx.yml /etc/cctv/
+$ sudo nano /etc/cctv/mediamtx.yml
 
+# go to the end of the file.
+# place under paths: you rtsp connetions
+
+paths:
+
+  gate:
+    source: rtsp://user:pass@192.168.1.99:554/Streaming/channels/101
+
+  center:
+    source: rtsp://user:pass@192.168.1.82:554/Streaming/channels/101
+
+  entrance:
+    source: rtsp://user:pass@192.168.1.89:554/Streaming/channels/101
+
+  garage:
+    source: rtsp://user:pass@192.168.1.81:554/Streaming/channels/101
+
+  behind:
+    source: rtsp://user:pass@192.168.1.92:554/Streaming/channels/101
+
+  left:
+    source: rtsp://user:pass@192.168.1.93:554/Streaming/channels/101
+
+  gate_sub:
+    source: rtsp://user:pass@192.168.1.99:554/Streaming/channels/102
+
+  center_sub:
+    source: rtsp://user:pass@192.168.1.82:554/Streaming/channels/102
+
+  entrance_sub:
+    source: rtsp://user:pass@192.168.1.89:554/Streaming/channels/102
+
+  garage_sub:
+    source: rtsp://user:pass@192.168.1.81:554/Streaming/channels/102
+
+  behind_sub:
+    source: rtsp://user:pass@192.168.1.92:554/Streaming/channels/102
+
+  left_sub:
+    source: rtsp://user:pass@192.168.1.93:554/Streaming/channels/102
+
+# set up the service and start
+$ cp cctv-media-mtx.service /systemd/system/
+$ sudo systemctl start cctv-media-mtx.service
+
+# log
+$ journalctl -u cctv-media-mtx.service -f -o cat
 
 ~~~
-
 
 ## Detector installation
 
