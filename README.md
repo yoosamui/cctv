@@ -392,7 +392,7 @@ the MediaMTX is also used from the image-detector.
 # log in into your RPI 5 via SSH
 $ git clone https://github.com/yoosamui/cctv-mediamtx.git
 $ cd cctv-mediamtx 
-$ cp /home/pi/cctv/mediamtx.yml /etc/cctv/
+$ cp mediamtx.yml /etc/cctv/
 $ sudo nano /etc/cctv/mediamtx.yml
 
 # go to the end of the file.
