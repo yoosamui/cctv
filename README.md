@@ -389,11 +389,11 @@ the MediaMTX is also used from the image-detector.
 **Configure the mediamtx**
 ~~~
 
-log in into your RPI 5 via SSH
-git clone https://github.com/yoosamui/cctv-mediamtx.git
-cd cctv-mediamtx 
-cp /etc/cctv/mediamtx.yml .
-sudo nano mediamtx.yml
+# log in into your RPI 5 via SSH
+$ git clone https://github.com/yoosamui/cctv-mediamtx.git
+$ cd cctv-mediamtx 
+$ cp /home/pi/cctv/mediamtx.yml /etc/cctv/
+$ sudo nano /etc/cctv/mediamtx.yml
 
 # go to the end of the file.
 # place under paths: you rtsp connetions
@@ -436,10 +436,12 @@ paths:
   left_sub:
     source: rtsp://user:pass@192.168.1.93:554/Streaming/channels/102
 
-# set uo the service and start
-cp cctv-media-mtx.service /systemd/system/
-sudo systemctl start cctv-media-mtx.service
-journalctl -u  start cctv-media-mtx.service -f -o cat
+# set up the service and start
+$ cp cctv-media-mtx.service /systemd/system/
+$ sudo systemctl start cctv-media-mtx.service
+
+# log
+$ journalctl -u cctv-media-mtx.service -f -o cat
 
 ~~~
 
