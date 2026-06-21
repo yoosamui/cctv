@@ -341,40 +341,9 @@ ALERT_TO="alerts@example.com"
 > `/session-reset` calls between them. Email alerts are enabled only when
 > `SMTP_USER`, `SMTP_PASS`, and `ALERT_TO` are all set.
 
-### Detector camera map
-
-Cameras live in the `NODES` dict in `cctv-image-detector.py` — each entry maps a
-camera name to its RTSP source (`cam_rtsp`) and the recorder upload endpoint
-(`rpi_url`). Camera names here must match the `--name` passed to the recorder and
-the keys used in the per-camera config sections.
-
-Note the detector's `cam_rtsp` uses each camera's **sub-stream**
-(`/Streaming/channels/102`, lower resolution — lighter for inference), while the
-recorder records the **main stream** (`/Streaming/channels/101`, full quality).
-This split is intentional.
 
 
-### Camera Recorder Configuration
-
-> Before starting the system, update the following configuration values:
-> 1. **Set the `rpi_url` node** for each recorder camera.
-> 2. **Set the `cam_rtsp` node** in the `cctv-image-detector.py` file.
-> 3. Replace the default username (`yoo`) with the appropriate camera username.
-> 4. Configure the camera password in:
-
-
-Use the same password value in the RTSP URL configuration. The {password} placeholder in the cam_rtsp node will be automatically resolved using the CAM_PASS value from credentials.env.
-
-
-   ```bash
-
-   /etc/cctv/credentials.env
-   CAM_PASS=<your_camera_password>
-
-   ```
-
-
-## cctv-mediamtx 
+# cctv-mediamtx: 
 
 This is a web-based CCTV live monitoring dashboard powered by MediaMTX + HLS streaming, designed to display multiple IP camera feeds in a responsive grid.
 
