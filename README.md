@@ -365,7 +365,7 @@ $ cp mediamtx.yml /etc/cctv/
 $ sudo nano /etc/cctv/mediamtx.yml
 
 # go to the end of the file.
-# place under paths: you rtsp connetions
+# place under paths: your rtsp connetions
 
 paths:
 
