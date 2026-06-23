@@ -347,6 +347,42 @@ ALERT_TO="alerts@example.com"
 >  Example output: xYz123AbC456DeF789GhI012JkL345MnO678PqR901StU234VwX
 
 
+** /etc/cctv/nodes.ini **
+you need to change the IPs with your own IPs per each camera:
+cam_rtsp = the RPI5 IP where the detector will runnging
+rpi_url = the RPI4 Recorder IP
+
+```ini
+
+[Gate]
+cam_rtsp = rtsp://192.168.1.19:8554/gate_sub
+rpi_url = http://192.168.1.14:5000/upload
+
+[Center]
+cam_rtsp = rtsp://192.168.1.19:8554/center_sub
+rpi_url = http://192.168.1.13:5000/upload
+
+[Entrance]
+cam_rtsp = rtsp://192.168.1.19:8554/entrance_sub
+rpi_url = http://192.168.1.15:5000/upload
+
+[Garage]
+cam_rtsp = rtsp://192.168.1.19:8554/garage_sub
+rpi_url = http://192.168.1.16:5000/upload
+
+[Behind]
+cam_rtsp = rtsp://192.168.1.19:8554/behind_sub
+rpi_url = http://192.168.1.17:5000/upload
+
+[Left]
+cam_rtsp = rtsp://192.168.1.19:8554/left_sub
+rpi_url = http://192.168.1.18:5000/upload
+
+```
+
+
+
+
 # cctv-mediamtx: 
 
 This is a web-based CCTV live monitoring dashboard powered by MediaMTX + HLS streaming, designed to display multiple IP camera feeds in a responsive grid.
@@ -438,8 +474,9 @@ make sure git and ffmpeg are installed. if not:
  $ cp /home/pi/cctv/image_detector_config/*.* .
 
 you have created the configuration files
-config.ini  credentials.env
-take your time and make the changes you need and save the changes.
+config.ini  credentials.env nodes.ini
+take your time and make the changes you need and save the files.
+
 ```
 
 

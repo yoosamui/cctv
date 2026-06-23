@@ -620,14 +620,59 @@ ENABLE_EMAIL_ALERTS = bool(SMTP_USER and SMTP_PASS and ALERT_TO)
 # ==========================================
 # CAMERA NODES
 # ==========================================
-NODES = {
-    "Gate":     {"cam_rtsp": f"rtsp://192.168.1.19:8554/gate_sub", "rpi_url": "http://192.168.1.14:5000/upload"},
-    "Center":   {"cam_rtsp": f"rtsp://192.168.1.19:8554/center_sub", "rpi_url": "http://192.168.1.13:5000/upload"},
-    "Entrance": {"cam_rtsp": f"rtsp://192.168.1.19:8554/entrance_sub", "rpi_url": "http://192.168.1.15:5000/upload"},
-    "Garage":   {"cam_rtsp": f"rtsp://192.168.1.19:8554/garage_sub", "rpi_url": "http://192.168.1.16:5000/upload"},
-    "Behind":   {"cam_rtsp": f"rtsp://192.168.1.19:8554/behind_sub", "rpi_url": "http://192.168.1.17:5000/upload"},
-    "Left":     {"cam_rtsp": f"rtsp://192.168.1.19:8554/left_sub", "rpi_url": "http://192.168.1.18:5000/upload"}
-}
+
+
+# Define config file path
+NODES_CONFIG_PATH = '/etc/cctv/nodes.ini'
+
+try:
+    # Check if file exists
+    if not os.path.exists(NODES_CONFIG_PATH):
+        raise FileNotFoundError(f"Configuration file not found: {NODES_CONFIG_PATH}")
+    
+    # Load configuration
+    config = configparser.ConfigParser()
+    config.read(NODES_CONFIG_PATH)
+        
+        
+    # Check if file is empty or has no sections
+    if not config.sections():
+        raise ValueError(f"Configuration file is empty or has no sections: {NODES_CONFIG_PATH}")
+
+
+    # Convert to NODES dictionary
+    NODES = {}
+    for section in config.sections():
+        # Check if required keys exist in each section
+        section_dict = dict(config.items(section))
+        if 'cam_rtsp' not in section_dict or 'rpi_url' not in section_dict:
+            raise KeyError(f"Section '{section}' is missing required keys (cam_rtsp or rpi_url)")
+        NODES[section] = section_dict
+
+
+    except FileNotFoundError as e:
+        print(f"ERROR: {e}")
+        print(f"Please ensure the configuration file exists at {NODES_CONFIG_PATH} ")
+        sys.exit(1)
+    
+    except configparser.ParsingError as e:
+        print(f"ERROR: Failed to parse configuration file: {e}")
+        print(f"Please check the syntax of your {NODES_CONFIG_PATH} file")
+        sys.exit(1)
+    
+    except KeyError as e:
+        print(f"ERROR: Missing configuration key: {e}")
+        print("Each node section must have 'cam_rtsp' and 'rpi_url' keys")
+        sys.exit(1)
+    
+    except ValueError as e:
+        print(f"ERROR: {e}")
+        sys.exit(1)
+    
+    except Exception as e:
+        print(f"ERROR: An unexpected error occurred: {e}")
+        print(f"Error type: {type(e).__name__}")
+        sys.exit(1)
 
 # ==========================================
 # PER-CAMERA SESSION STATE
