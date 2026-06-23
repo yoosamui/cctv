@@ -340,7 +340,11 @@ ALERT_TO="alerts@example.com"
 > `WEBHOOK_SECRET` must match on both nodes — it authenticates the `/upload` and
 > `/session-reset` calls between them. Email alerts are enabled only when
 > `SMTP_USER`, `SMTP_PASS`, and `ALERT_TO` are all set.
-
+>
+>  # Generate a 64-byte base64 string:
+>  $ openssl rand -base64 32
+>
+>  Example output: xYz123AbC456DeF789GhI012JkL345MnO678PqR901StU234VwX
 
 
 # cctv-mediamtx: 
