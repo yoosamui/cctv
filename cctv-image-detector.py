@@ -600,11 +600,6 @@ yolo_process = None
 # AUTHENTICATION
 # ==========================================
 load_dotenv("/etc/cctv/credentials.env")
-CAM_PASS = os.getenv("CAM_PASS")
-if not CAM_PASS:
-    print("ERROR: CAM_PASS not found!")
-    sys.exit(1)
-password = quote(CAM_PASS)
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "change-this-default-secret")
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
@@ -621,9 +616,6 @@ SMTP_PASS = os.getenv("SMTP_PASS")
 ALERT_TO   = os.getenv("ALERT_TO")
 ENABLE_EMAIL_ALERTS = bool(SMTP_USER and SMTP_PASS and ALERT_TO)
 
-
-#   "Gate":     {"cam_rtsp": f"rtps://yoo:{password}@192.168.1.99:554/Streaming/channels/102", "rpi_url": "http://192.168.1.14:5000/upload"},
-# rtsp://127.0.0.1:8554/Center
 
 # ==========================================
 # CAMERA NODES
