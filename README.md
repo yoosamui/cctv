@@ -346,7 +346,7 @@ ALERT_TO="alerts@example.com"
 >
 > Example output: xYz123AbC456DeF789GhI012JkL345MnO678PqR901StU234VwX
 
-** /etc/cctv/nodes.ini **
+**/etc/cctv/nodes.ini**
 you need to change the IPs with your own IPs per each camera:
 cam_rtsp = the RPI5 IP where the detector will runnging
 rpi_url = the RPI4 Recorder IP
