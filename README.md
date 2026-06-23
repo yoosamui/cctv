@@ -268,7 +268,7 @@ max_images_per_session = 3                      ; cap on detection frames
 
 [NETWORK]
 flask_port = 5000
-detector_webhook_url = http://192.168.1.19:5001/session-reset   ; optional
+detector_webhook_url = http://RPI5-IP:5001/session-reset   ; optional
 ```
 **NOTE:** set `detector_webhook_url` to the detector (RPi 5) address — a full URL, e.g. `http://<RPI5_IP>:5001/session-reset`.
 
@@ -340,8 +340,11 @@ ALERT_TO="alerts@example.com"
 > `WEBHOOK_SECRET` must match on both nodes — it authenticates the `/upload` and
 > `/session-reset` calls between them. Email alerts are enabled only when
 > `SMTP_USER`, `SMTP_PASS`, and `ALERT_TO` are all set.
-
-
+>
+>  Generate a 64-byte base64 string:
+>  $ openssl rand -base64 32
+>
+> Example output: xYz123AbC456DeF789GhI012JkL345MnO678PqR901StU234VwX
 
 # cctv-mediamtx: 
 
