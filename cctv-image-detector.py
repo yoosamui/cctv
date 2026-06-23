@@ -650,29 +650,29 @@ try:
         NODES[section] = section_dict
 
 
-    except FileNotFoundError as e:
-        print(f"ERROR: {e}")
-        print(f"Please ensure the configuration file exists at {NODES_CONFIG_PATH} ")
-        sys.exit(1)
+except FileNotFoundError as e:
+    print(f"ERROR: {e}")
+    print(f"Please ensure the configuration file exists at {NODES_CONFIG_PATH} ")
+    sys.exit(1)
     
-    except configparser.ParsingError as e:
-        print(f"ERROR: Failed to parse configuration file: {e}")
-        print(f"Please check the syntax of your {NODES_CONFIG_PATH} file")
-        sys.exit(1)
+except configparser.ParsingError as e:
+    print(f"ERROR: Failed to parse configuration file: {e}")
+    print(f"Please check the syntax of your {NODES_CONFIG_PATH} file")
+    sys.exit(1)
     
-    except KeyError as e:
-        print(f"ERROR: Missing configuration key: {e}")
-        print("Each node section must have 'cam_rtsp' and 'rpi_url' keys")
-        sys.exit(1)
+except KeyError as e:
+    print(f"ERROR: Missing configuration key: {e}")
+    print(f"Each node section must have 'cam_rtsp' and 'rpi_url' keys")
+    sys.exit(1)
     
-    except ValueError as e:
-        print(f"ERROR: {e}")
-        sys.exit(1)
+except ValueError as e:
+    print(f"ERROR: {e}")
+    sys.exit(1)
     
-    except Exception as e:
-        print(f"ERROR: An unexpected error occurred: {e}")
-        print(f"Error type: {type(e).__name__}")
-        sys.exit(1)
+except Exception as e:
+    print(f"ERROR: An unexpected error occurred: {e}")
+    print(f"Error type: {type(e).__name__}")
+    sys.exit(1)
 
 # ==========================================
 # PER-CAMERA SESSION STATE
