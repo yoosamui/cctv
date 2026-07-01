@@ -276,6 +276,7 @@ RESULT_QUEUE_SIZE = cfg_int("UPLOAD", "RESULT_QUEUE_SIZE")
 
 FILTER_CONFIDENCE = cfg_float("FILTERS", "FILTER_CONFIDENCE")
 
+ENABLE_EMAIL_ALERTS = cfg_bool( "GENERAL","ENABLE_EMAIL_ALERTS")
 # ==========================================
 # CAMERA-SPECIFIC CONFIGURATION LOADING (with day/night support)
 # ==========================================
@@ -614,7 +615,8 @@ SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
 SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASS = os.getenv("SMTP_PASS")
 ALERT_TO   = os.getenv("ALERT_TO")
-ENABLE_EMAIL_ALERTS = bool(SMTP_USER and SMTP_PASS and ALERT_TO)
+
+ENABLE_EMAIL_ALERTS = bool(SMTP_USER and SMTP_PASS and ALERT_TO and ENABLE_EMAIL_ALERTS)
 
 
 # ==========================================
@@ -630,25 +632,20 @@ try:
     if not os.path.exists(NODES_CONFIG_PATH):
         raise FileNotFoundError(f"Configuration file not found: {NODES_CONFIG_PATH}")
     
-    # Load configuration
-    config = configparser.ConfigParser()
-    config.read(NODES_CONFIG_PATH)
+    nodes = configparser.ConfigParser()
+    nodes.read(NODES_CONFIG_PATH)
         
-        
-    # Check if file is empty or has no sections
-    if not config.sections():
+    # nodes.sections()
+    if not nodes.sections():
         raise ValueError(f"Configuration file is empty or has no sections: {NODES_CONFIG_PATH}")
 
-
-    # Convert to NODES dictionary
     NODES = {}
-    for section in config.sections():
-        # Check if required keys exist in each section
-        section_dict = dict(config.items(section))
+    for section in nodes.sections():
+        # nodes.items(section)
+        section_dict = dict(nodes.items(section))
         if 'cam_rtsp' not in section_dict or 'rpi_url' not in section_dict:
             raise KeyError(f"Section '{section}' is missing required keys (cam_rtsp or rpi_url)")
         NODES[section] = section_dict
-
 
 except FileNotFoundError as e:
     print(f"ERROR: {e}")
@@ -989,6 +986,12 @@ def send_rejection_email(camera_name, frame, box, confidence, reason,
     if not SMTP_USER or not SMTP_PASS or not ALERT_TO:
         return
 
+    # Rate limit: skip if we sent one recently for this camera
+    now = time.time()
+    if now - last_rejection_email_time[camera_name] < REJECTION_EMAIL_INTERVAL:
+        return
+    last_rejection_email_time[camera_name] = now
+
     try:
         x1, y1, x2, y2 = box
         width = x2 - x1
@@ -1167,374 +1170,6 @@ def config_reload_thread():
             import traceback
             traceback.print_exc()
 
-
-# ==========================================
-# YOLO WORKER PROCESS
-# ==========================================
-def yolo_worker_process_OLD(input_q, output_q, min_person_area, min_aspect_ratio, max_aspect_ratio,
-                        enable_area_filter, enable_aspect_filter, enable_dark_filter,
-                        camera_min_area_dict, camera_max_area_dict, camera_aspect_ratios_dict,
-                        camera_top_edge_dict, camera_exclude_zones_dict,
-                        enable_exclude_zone_filter, exclude_zone_coverage,
-                        yolo_iou, debug_log_interval):
-
-    import threading
-
-    _last_area_log_time = {}
-    _last_maxarea_log_time = {}
-    _last_aspect_log_time = {}
-    _last_topedge_log_time = {}
-    _last_topedge_accept_log_time = {}
-    _last_dark_log_time = {}
-    _last_exclude_log_time = {}
-
-    _last_area_save_time = {}
-    _last_maxarea_save_time = {}
-    _last_aspect_save_time = {}
-    _last_topedge_save_time = {}
-    _last_dark_save_time = {}
-    _last_exclude_save_time = {}
-
-    _log_lock = threading.Lock()
-
-    _last_rejection_queue_time = {}
-    _rejection_pending = []
-    _rejection_lock = threading.Lock()
-
-    def queue_rejection_email(camera_name, frame, box, confidence, reason, **kwargs):
-        now = time.time()
-        last = _last_rejection_queue_time.get(camera_name, 0)
-        if now - last >= 300:
-            _last_rejection_queue_time[camera_name] = now
-            with _rejection_lock:
-                _rejection_pending.append(
-                    (camera_name, frame.copy() if frame is not None else None,
-                     box, confidence, reason, kwargs)
-                )
-
-    def is_valid_person_detection_worker(camera_name, box, confidence,
-                                         image_height, frame_id=None, original_frame=None):
-        x1, y1, x2, y2 = box
-        width = x2 - x1
-        height = y2 - y1
-        area = width * height
-        min_area = camera_min_area_dict.get(camera_name, min_person_area)
-        max_area = camera_max_area_dict.get(camera_name) if camera_max_area_dict else None
-        min_ratio, max_ratio = camera_aspect_ratios_dict.get(
-            camera_name, (min_aspect_ratio, max_aspect_ratio)
-        )
-
-        # Camera's exclude zones — used by the filter below and, when DRAW_ZONES
-        # is on, drawn on every rejected image (any reason) so they can be tuned.
-        zones = camera_exclude_zones_dict.get(camera_name) if camera_exclude_zones_dict else None
-
-        # Exclusion-zone filter — reject detections that sit inside a fixed
-        # ignore region (static clutter, fixtures like a hanging clothes rack).
-        # Runs FIRST, at ALL confidence levels (before the high-conf bypass
-        # below) because a static object can occasionally score above
-        # FILTER_CONFIDENCE. A detection is rejected only when at least
-        # `exclude_zone_coverage` of its box area falls inside a zone, so a real
-        # person who merely clips the edge of the region is still detected.
-        if enable_exclude_zone_filter and zones:
-            box_area = max(1, width * height)
-            for zx1, zy1, zx2, zy2 in zones:
-                ix1 = max(x1, zx1)
-                iy1 = max(y1, zy1)
-                ix2 = min(x2, zx2)
-                iy2 = min(y2, zy2)
-                if ix2 > ix1 and iy2 > iy1:
-                    covered = (ix2 - ix1) * (iy2 - iy1) / box_area
-                    if covered >= exclude_zone_coverage:
-                        with _log_lock:
-                            now = time.time()
-                            if now - _last_exclude_log_time.get(camera_name, 0) >= debug_log_interval:
-                                _last_exclude_log_time[camera_name] = now
-                                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: "
-                                      f"In exclude zone ({covered:.0%} of box in "
-                                      f"{(zx1, zy1, zx2, zy2)}) conf={confidence:.2f} REJECTED!")
-
-                        if original_frame is not None and SAVE_REJECTED_IMAGES:
-                            now = time.time()
-                            if now - _last_exclude_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
-                                _last_exclude_save_time[camera_name] = now
-                                save_rejected_image(camera_name, original_frame, box, confidence,
-                                                    "exclude_zone", zones=zones)
-
-                        queue_rejection_email(camera_name, original_frame, box, confidence,
-                                              "exclude_zone")
-                        return False
-
-        # Aspect-ratio (shape) filter — applied only to LOW-confidence detections
-        # (conf < FILTER_CONFIDENCE). A standing person is taller than wide, but a
-        # genuine person with arms outstretched / carrying something / bending can
-        # produce a near-square box; rejecting those on shape drops real people.
-        # In practice false-positive wide boxes (e.g. vehicles) score low, so the
-        # shape check still catches them here, while high-confidence detections are
-        # trusted and fall through to the bypass below.
-        if enable_aspect_filter and width > 0 and confidence < FILTER_CONFIDENCE:
-            aspect_ratio_val = height / width
-            if aspect_ratio_val < min_ratio or aspect_ratio_val > max_ratio:
-                with _log_lock:
-                    now = time.time()
-                    if now - _last_aspect_log_time.get(camera_name, 0) >= debug_log_interval:
-                        _last_aspect_log_time[camera_name] = now
-                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: "
-                              f"Bad aspect ratio ({aspect_ratio_val:.2f}) - "
-                              f"box: {width}x{height}px conf={confidence:.2f} REJECTED!")
-
-                if original_frame is not None and SAVE_REJECTED_IMAGES:
-                    now = time.time()
-                    if now - _last_aspect_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
-                        _last_aspect_save_time[camera_name] = now
-                        save_rejected_image(camera_name, original_frame, box, confidence,
-                                            "aspect", aspect_ratio=aspect_ratio_val, zones=zones)
-
-                queue_rejection_email(camera_name, original_frame, box, confidence,
-                                      "aspect", aspect_ratio=aspect_ratio_val)
-                return False
-
-        # High confidence bypass — trusted detection, shape check skipped above
-        if confidence >= FILTER_CONFIDENCE:
-            return True
-
-        # ==========================================
-        # DARK PIXEL FILTER - UPDATED to show actual percentage
-        # ==========================================
-        if enable_dark_filter and confidence < FILTER_CONFIDENCE:
-            is_dark, dark_percent_actual = is_dark_detection(original_frame, box, DARKNESS_THRESHOLD, DARK_PIXEL_RATIO)
-            if is_dark:
-                with _log_lock:
-                    now = time.time()
-                    if now - _last_dark_log_time.get(camera_name, 0) >= debug_log_interval and ENABLE_DEBUG_PRINTS:
-                        _last_dark_log_time[camera_name] = now
-                        dark_threshold_percent = int(DARK_PIXEL_RATIO * 100)
-                        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: "
-                              f"Too many dark pixels ({dark_percent_actual:.1f}% dark > {dark_threshold_percent}% threshold) - "
-                              f"box: {width}x{height}px conf={confidence:.2f} REJECTED!")
-
-                if original_frame is not None and SAVE_REJECTED_IMAGES:
-                    now = time.time()
-                    if now - _last_dark_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
-                        _last_dark_save_time[camera_name] = now
-                        save_rejected_image(camera_name, original_frame, box, confidence,
-                                            "dark_pixels", min_value=int(DARK_PIXEL_RATIO * 100), zones=zones)
-
-                queue_rejection_email(camera_name, original_frame, box, confidence, "dark_pixels")
-                return False
-
-        # Min area filter
-        if enable_area_filter and area < min_area:
-            with _log_lock:
-                now = time.time()
-                if now - _last_area_log_time.get(camera_name, 0) >= debug_log_interval and ENABLE_DEBUG_PRINTS:
-                    _last_area_log_time[camera_name] = now
-                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: "
-                          f"Area too small ({area}px < {min_area}px) - "
-                          f"box: {width}x{height}px REJECTED!")
-
-            if original_frame is not None and SAVE_REJECTED_IMAGES:
-                now = time.time()
-                if now - _last_area_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
-                    _last_area_save_time[camera_name] = now
-                    save_rejected_image(camera_name, original_frame, box, confidence,
-                                        "area", area=area, min_value=min_area, zones=zones)
-
-            queue_rejection_email(camera_name, original_frame, box, confidence,
-                                  "area", area=area, min_value=min_area)
-            return False
-
-        # Max area filter
-        if max_area is not None and area > max_area:
-            with _log_lock:
-                now = time.time()
-                if now - _last_maxarea_log_time.get(camera_name, 0) >= debug_log_interval:
-                    _last_maxarea_log_time[camera_name] = now
-                    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: "
-                          f"Area too large ({area}px > {max_area}px) - "
-                          f"box: {width}x{height}px conf={confidence:.2f} REJECTED!")
-
-            if original_frame is not None and SAVE_REJECTED_IMAGES:
-                now = time.time()
-                if now - _last_maxarea_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
-                    _last_maxarea_save_time[camera_name] = now
-                    save_rejected_image(camera_name, original_frame, box, confidence,
-                                        "area_too_large", area=area, min_value=max_area, zones=zones)
-
-            queue_rejection_email(camera_name, original_frame, box, confidence,
-                                  "area_too_large", area=area, min_value=max_area)
-            return False
-
-        # Top-edge filter — per-camera (margin, high_conf) from [TOP_EDGE_CONFIG],
-        # falling back to the global [FILTERS] values for any camera not listed.
-        if ENABLE_TOP_EDGE_FILTER and image_height is not None:
-            top_margin, top_high_conf = camera_top_edge_dict.get(
-                camera_name, (TOP_EDGE_MARGIN, TOP_EDGE_HIGH_CONF)
-            )
-            LABEL_MARGIN = 12
-            top_y = y1
-            if top_y <= top_margin + LABEL_MARGIN:
-                if confidence < top_high_conf:
-                    with _log_lock:
-                        now = time.time()
-                        if now - _last_topedge_log_time.get(camera_name, 0) >= debug_log_interval:
-                            _last_topedge_log_time[camera_name] = now
-                            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ❌ [DEBUG] {camera_name}: "
-                                  f"Top-edge rejection - y1={top_y}, "
-                                  f"conf={confidence:.2f}<{top_high_conf} REJECTED!")
-
-                    if original_frame is not None and SAVE_REJECTED_IMAGES:
-                        now = time.time()
-                        if now - _last_topedge_save_time.get(camera_name, 0) >= SAVE_IMAGE_INTERVAL:
-                            _last_topedge_save_time[camera_name] = now
-                            save_rejected_image(camera_name, original_frame, box, confidence,
-                                                "top_edge", top_y=top_y, min_conf=top_high_conf, zones=zones)
-
-                    queue_rejection_email(camera_name, original_frame, box, confidence, "top_edge")
-                    return False
-                else:
-                    with _log_lock:
-                        now = time.time()
-                        if now - _last_topedge_accept_log_time.get(camera_name, 0) >= debug_log_interval:
-                            _last_topedge_accept_log_time[camera_name] = now
-                            print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ✅ [DEBUG] {camera_name}: "
-                                  f"Top-edge HIGH CONF ACCEPT - y1={top_y}, "
-                                  f"conf={confidence:.2f}>={top_high_conf}")
-
-        return True
-
-    # --- YOLO model load ---
-    try:
-        print("Loading yolov8n.onnx with pure ONNX Runtime...")
-        so = ort.SessionOptions()
-        so.intra_op_num_threads = 1
-        so.inter_op_num_threads = 1
-        session = ort.InferenceSession(
-            "yolov8n.onnx",
-            sess_options=so,
-            providers=["CPUExecutionProvider"]
-        )
-        input_name = session.get_inputs()[0].name
-        print("Pure ONNX Runtime initialized")
-        print("Ultra-light + smart NMS (minimal CPU increase)")
-    except Exception as e:
-        print(f"❌ ONNX load failed: {e}")
-        return
-
-    # Day/night config reload (worker-local): this worker is a separate process and
-    # will NOT see config dicts updated in the main process, so we re-check the
-    # day/night transition here and reload directly from the config file.
-    current_daytime = is_daytime()
-    last_config_check = time.time()
-    CONFIG_CHECK_INTERVAL = 60  # seconds
-
-    while True:
-        try:
-            now_check = time.time()
-            if now_check - last_config_check >= CONFIG_CHECK_INTERVAL:
-                last_config_check = now_check
-                if is_daytime() != current_daytime:
-                    current_daytime = is_daytime()
-                    camera_min_area_dict = load_camera_config("CAMERA_MIN_AREA")
-                    camera_max_area_dict = load_camera_config("CAMERA_MAX_AREA")
-                    camera_aspect_ratios_dict = load_camera_config("CAMERA_ASPECT_RATIO")
-                    camera_top_edge_dict = load_camera_config("TOP_EDGE_CONFIG")
-                    
-                    if config.has_section("CAMERA_EXCLUDE_ZONE"):
-                        camera_exclude_zones_dict = load_camera_config("CAMERA_EXCLUDE_ZONE")
-                        
-                    print(
-                        f"Gate={camera_min_area_dict.get('Gate')} "
-                        f"Center={camera_min_area_dict.get('Center')} "
-                        f"Entrance={camera_min_area_dict.get('Entrance')} "
-                        f"Garage={camera_min_area_dict.get('Garage')} "
-                        f"Behind={camera_min_area_dict.get('Behind')} "
-                        f"Left={camera_min_area_dict.get('Left')} "
-                    )
-    
-    
-                    print(
-                        f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] "
-                        f"🔄 [WORKER] Camera configs reloaded for "
-                        f"{'DAY ☀️' if current_daytime else 'NIGHT 🌙'}"
-                    )
-    
-
-            name, frame, ts, capture_time = input_q.get(timeout=0.5)
-
-            h, w = frame.shape[:2]
-            scale_x = w / YOLO_INPUT_SIZE
-            scale_y = h / YOLO_INPUT_SIZE
-
-            img = cv2.resize(frame, (YOLO_INPUT_SIZE, YOLO_INPUT_SIZE))
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            img = (img.astype(np.float32) / 255.0).transpose(2, 0, 1).reshape(
-                1, 3, YOLO_INPUT_SIZE, YOLO_INPUT_SIZE
-            )
-
-            outputs = session.run(None, {input_name: img})
-            predictions = outputs[0][0]
-
-            detections = []
-            for pred in predictions.T:
-                confidence = np.max(pred[4:])
-                if confidence < YOLO_CONFIDENCE:
-                    continue
-                if np.argmax(pred[4:]) != 0:
-                    continue
-
-                xc, yc, pw, ph = pred[:4]
-                x1 = int((xc - pw / 2) * scale_x)
-                y1 = int((yc - ph / 2) * scale_y)
-                x2 = int((xc + pw / 2) * scale_x)
-                y2 = int((yc + ph / 2) * scale_y)
-                box = [x1, y1, x2, y2]
-
-                if is_valid_person_detection_worker(name, box, confidence, h, None, frame):
-                    detections.append({"box": box, "conf": float(confidence)})
-
-            # NMS
-            if len(detections) > 0:
-                detections.sort(key=lambda x: x['conf'], reverse=True)
-                filtered = []
-                for d1 in detections:
-                    keep = True
-                    x1, y1, x2, y2 = d1['box']
-                    area1 = (x2 - x1) * (y2 - y1)
-                    for d2 in filtered:
-                        xx1 = max(x1, d2['box'][0])
-                        yy1 = max(y1, d2['box'][1])
-                        xx2 = min(x2, d2['box'][2])
-                        yy2 = min(y2, d2['box'][3])
-                        if xx2 > xx1 and yy2 > yy1:
-                            overlap = (xx2 - xx1) * (yy2 - yy1)
-                            area2 = ((d2['box'][2] - d2['box'][0]) *
-                                     (d2['box'][3] - d2['box'][1]))
-                            union = area1 + area2 - overlap
-                            iou = overlap / union if union > 0 else 0
-                            if iou > yolo_iou:
-                                keep = False
-                                break
-                    if keep:
-                        filtered.append(d1)
-                detections = filtered
-
-            # Drain pending rejection emails and include in result
-            with _rejection_lock:
-                rejections = _rejection_pending.copy()
-                _rejection_pending.clear()
-
-            try:
-                output_q.put_nowait((name, frame, detections, ts, capture_time, rejections))
-            except Full:
-                print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ⚠️ Result queue full, "
-                      f"dropping {name} detection")
-
-        except Empty:
-            continue
-        except Exception as e:
-            print(f"YOLO error: {e}")
-            time.sleep(1)
-################################################################################
 
 
 # ==========================================
